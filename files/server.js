@@ -379,7 +379,7 @@ app.post("/anthropic", async (req, res) => {
       method: "POST",
       headers: {
         "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2024-10-22",
+        "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
