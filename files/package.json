@@ -1,7 +1,7 @@
 {
-  "name": "compulife-proxy",
-  "version": "1.0.0",
-  "description": "Compulife API Proxy — Static IP via Railway",
+  "name": "quoteit-api-hub",
+  "version": "6.1.0",
+  "description": "QuoteIt API Hub — Compulife + GHL + Anthropic Proxy",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
