@@ -1,8 +1,8 @@
 // ============================================================
-// QUOTEIT API HUB — Railway Proxy Server v6.1
-// Routes: Compulife | GHL (CRM) | Anthropic (OCR)
+// QUOTEIT API HUB — Railway Proxy Server v6.2
+// Routes: Compulife | GHL (CRM) | Anthropic (OCR) | Google Drive
 // Deploy: Railway with Static Egress IP
-// Updated: Feb 21, 2026 — GHL Full Integration for Monday Launch
+// Updated: Feb 22, 2026 — Google Drive Upload for Lead Scanner Pro v2
 // ============================================================
 
 const express = require("express");
@@ -19,6 +19,12 @@ const GHL_API_KEY = process.env.GHL_API_KEY || "";
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "";
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
+
+// Google Drive Config
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
+const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || "";
+const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 
 // ---- CORS ----
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
@@ -50,9 +56,14 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "quoteit-api-hub",
-    version: "6.1.0",
+    version: "6.2.0",
     timestamp: new Date().toISOString(),
-    configured: { compulife: !!AUTH_ID, ghl: !!GHL_API_KEY, anthropic: !!ANTHROPIC_API_KEY },
+    configured: {
+      compulife: !!AUTH_ID,
+      ghl: !!GHL_API_KEY,
+      anthropic: !!ANTHROPIC_API_KEY,
+      googleDrive: !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
+    },
     ghl_endpoints: [
       "POST   /ghl/contacts",
       "GET    /ghl/contacts/search?query=",
@@ -73,6 +84,7 @@ app.get("/", (req, res) => {
       "POST   /ghl/opportunities",
       "PUT    /ghl/opportunities/:id",
       "POST   /ghl/phone/call",
+      "POST   /drive/upload",
     ],
   });
 });
@@ -90,7 +102,6 @@ async function ghlFetch(method, path, body = null) {
       Version: "2021-07-28",
     },
   };
-  // Private Integration tokens (pit-) work with the same header format
   if (body && (method === "POST" || method === "PUT")) {
     opts.body = JSON.stringify(body);
   }
@@ -105,6 +116,182 @@ async function ghlFetch(method, path, body = null) {
   }
   return data;
 }
+
+// ============================================================
+// GOOGLE DRIVE HELPER
+// ============================================================
+let cachedAccessToken = null;
+let tokenExpiresAt = 0;
+
+async function getGoogleAccessToken() {
+  // Return cached token if still valid (with 60s buffer)
+  if (cachedAccessToken && Date.now() < tokenExpiresAt - 60000) {
+    return cachedAccessToken;
+  }
+
+  console.log("[Drive] Refreshing access token...");
+  const resp = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET,
+      refresh_token: GOOGLE_REFRESH_TOKEN,
+      grant_type: "refresh_token",
+    }),
+  });
+
+  const data = await resp.json();
+  if (!resp.ok || !data.access_token) {
+    console.error("[Drive] Token refresh failed:", data);
+    throw new Error(`Failed to refresh Google token: ${data.error_description || data.error || "unknown"}`);
+  }
+
+  cachedAccessToken = data.access_token;
+  tokenExpiresAt = Date.now() + (data.expires_in * 1000);
+  console.log("[Drive] Access token refreshed successfully");
+  return cachedAccessToken;
+}
+
+async function findOrCreateFolder(accessToken, folderName, parentId) {
+  // Search for existing folder
+  const query = `name='${folderName.replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name)`;
+
+  const searchResp = await fetch(searchUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  const searchData = await searchResp.json();
+
+  if (searchData.files && searchData.files.length > 0) {
+    return searchData.files[0].id;
+  }
+
+  // Create folder
+  console.log(`[Drive] Creating folder: ${folderName}`);
+  const createResp = await fetch("https://www.googleapis.com/drive/v3/files", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      name: folderName,
+      mimeType: "application/vnd.google-apps.folder",
+      parents: [parentId],
+    }),
+  });
+
+  const createData = await createResp.json();
+  if (!createResp.ok) {
+    throw new Error(`Failed to create folder: ${createData.error?.message || "unknown"}`);
+  }
+  return createData.id;
+}
+
+// ============================================================
+// GOOGLE DRIVE — FILE UPLOAD
+// ============================================================
+app.post("/drive/upload", async (req, res) => {
+  try {
+    if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
+      return res.status(500).json({ error: true, message: "Google Drive not configured" });
+    }
+
+    const { fileData, fileName, mimeType, vendorFolder } = req.body;
+    if (!fileData) return res.status(400).json({ error: true, message: "fileData (base64) required" });
+
+    const accessToken = await getGoogleAccessToken();
+
+    // Determine parent folder
+    let parentFolderId = GOOGLE_DRIVE_FOLDER_ID;
+
+    // If no root folder configured, create "Lead Scanner Pro" in Drive root
+    if (!parentFolderId) {
+      parentFolderId = await findOrCreateFolder(accessToken, "Lead Scanner Pro", "root");
+    }
+
+    // Create vendor subfolder if specified
+    let targetFolderId = parentFolderId;
+    if (vendorFolder) {
+      targetFolderId = await findOrCreateFolder(accessToken, vendorFolder, parentFolderId);
+    }
+
+    // Upload file using multipart upload
+    const boundary = "lead_scanner_boundary_" + Date.now();
+    const metadata = JSON.stringify({
+      name: fileName || `lead_${Date.now()}.pdf`,
+      parents: [targetFolderId],
+    });
+
+    // Decode base64 to binary
+    const fileBuffer = Buffer.from(fileData, "base64");
+
+    const multipartBody = Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\n` +
+        `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+        `${metadata}\r\n` +
+        `--${boundary}\r\n` +
+        `Content-Type: ${mimeType || "application/pdf"}\r\n` +
+        `Content-Transfer-Encoding: base64\r\n\r\n`
+      ),
+      fileBuffer,
+      Buffer.from(`\r\n--${boundary}--`),
+    ]);
+
+    const uploadResp = await fetch(
+      "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink,webContentLink",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": `multipart/related; boundary=${boundary}`,
+          "Content-Length": multipartBody.length,
+        },
+        body: multipartBody,
+      }
+    );
+
+    const uploadData = await uploadResp.json();
+
+    if (!uploadResp.ok) {
+      console.error("[Drive] Upload failed:", uploadData);
+      return res.status(uploadResp.status).json({
+        error: true,
+        message: uploadData.error?.message || "Upload failed",
+      });
+    }
+
+    // Make file viewable by anyone with the link
+    await fetch(`https://www.googleapis.com/drive/v3/files/${uploadData.id}/permissions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        role: "reader",
+        type: "anyone",
+      }),
+    });
+
+    console.log(`[Drive] ✓ Uploaded: ${uploadData.name} → ${uploadData.webViewLink}`);
+
+    res.json({
+      success: true,
+      fileId: uploadData.id,
+      fileName: uploadData.name,
+      webViewLink: uploadData.webViewLink,
+      webContentLink: uploadData.webContentLink,
+      driveUrl: `https://drive.google.com/file/d/${uploadData.id}/view`,
+    });
+
+  } catch (e) {
+    console.error("[Drive] Error:", e.message);
+    res.status(500).json({ error: true, message: e.message });
+  }
+});
 
 // ============================================================
 // GHL — CONTACTS
@@ -179,7 +366,6 @@ app.get("/ghl/conversations/:conversationId/messages", async (req, res) => {
   } catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
-// Send SMS, Email, or WhatsApp
 app.post("/ghl/conversations/messages", async (req, res) => {
   try {
     const payload = {
@@ -372,8 +558,30 @@ async function proxyPrivate(path, params) {
 app.post("/anthropic", async (req, res) => {
   try {
     if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
-    const { image, media_type, prompt } = req.body;
-    if (!image) return res.status(400).json({ error: "image (base64) required" });
+
+    // Support both legacy format and new passthrough format
+    const isPassthrough = req.body.model && req.body.messages;
+
+    let body;
+    if (isPassthrough) {
+      // New format: pass through the full Anthropic request
+      body = JSON.stringify(req.body);
+    } else {
+      // Legacy format: image + prompt
+      const { image, media_type, prompt } = req.body;
+      if (!image) return res.status(400).json({ error: "image (base64) required" });
+      body = JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 4096,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: media_type || "image/png", data: image } },
+            { type: "text", text: prompt || "Extract all text from this lead card. Return JSON." },
+          ],
+        }],
+      });
+    }
 
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -382,17 +590,7 @@ app.post("/anthropic", async (req, res) => {
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 4096,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type: media_type || "image/png", data: image } },
-            { type: "text", text: prompt || "Extract all text from this lead card. Return JSON: first_name, last_name, address, city, state, zip, phone, age, dob, gender, tobacco, beneficiary, mortgage_amount, insurance_company, policy_type, vendor_source." },
-          ],
-        }],
-      }),
+      body,
     });
 
     const data = await r.json();
@@ -407,10 +605,11 @@ app.post("/anthropic", async (req, res) => {
 // START
 // ============================================================
 app.listen(PORT, () => {
-  console.log(`\n✅ QuoteIt API Hub v6.1 running on port ${PORT}`);
-  console.log(`   Compulife: ${AUTH_ID ? "✓ configured" : "✗ NOT SET"}`);
-  console.log(`   GHL:       ${GHL_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
-  console.log(`   Anthropic: ${ANTHROPIC_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
-  console.log(`   Location:  ${GHL_LOCATION_ID || "NOT SET"}`);
-  console.log(`   CORS:      ${ALLOWED_ORIGINS.join(", ")}\n`);
+  console.log(`\n✅ QuoteIt API Hub v6.2 running on port ${PORT}`);
+  console.log(`   Compulife:  ${AUTH_ID ? "✓ configured" : "✗ NOT SET"}`);
+  console.log(`   GHL:        ${GHL_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
+  console.log(`   Anthropic:  ${ANTHROPIC_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
+  console.log(`   Drive:      ${GOOGLE_REFRESH_TOKEN ? "✓ configured" : "✗ NOT SET"}`);
+  console.log(`   Location:   ${GHL_LOCATION_ID || "NOT SET"}`);
+  console.log(`   CORS:       ${ALLOWED_ORIGINS.join(", ")}\n`);
 });
