@@ -25,6 +25,7 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || "";
 const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
+const GCP_VISION_API_KEY = process.env.GCP_VISION_API_KEY || "";
 
 // ---- CORS ----
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
@@ -63,6 +64,7 @@ app.get("/", (req, res) => {
       ghl: !!GHL_API_KEY,
       anthropic: !!ANTHROPIC_API_KEY,
       googleDrive: !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
+      googleVision: !!GCP_VISION_API_KEY,
     },
     ghl_endpoints: [
       "POST   /ghl/contacts",
@@ -289,6 +291,77 @@ app.post("/drive/upload", async (req, res) => {
 
   } catch (e) {
     console.error("[Drive] Error:", e.message);
+    res.status(500).json({ error: true, message: e.message });
+  }
+});
+
+// ============================================================
+// GOOGLE VISION — OCR Proxy for Lead Scanner Pro
+// ============================================================
+app.post("/vision/ocr", async (req, res) => {
+  try {
+    const GCP_API_KEY = process.env.GCP_VISION_API_KEY || "";
+    if (!GCP_API_KEY) return res.status(500).json({ error: true, message: "GCP_VISION_API_KEY not configured" });
+
+    const { imageData, mimeType } = req.body;
+    if (!imageData) return res.status(400).json({ error: true, message: "imageData (base64) required" });
+
+    const url = `https://vision.googleapis.com/v1/images:annotate?key=${GCP_API_KEY}`;
+    const body = {
+      requests: [{
+        image: { content: imageData },
+        features: [{ type: "DOCUMENT_TEXT_DETECTION", maxResults: 1 }],
+        imageContext: { languageHints: ["en"] },
+      }],
+    };
+
+    console.log("[Vision] Processing OCR request...");
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    const result = await resp.json();
+    if (!resp.ok) {
+      console.error("[Vision] API error:", result);
+      return res.status(resp.status).json({ error: true, message: result.error?.message || "Vision API error" });
+    }
+
+    const annotation = result.responses?.[0];
+    if (annotation?.error) {
+      return res.status(400).json({ error: true, message: annotation.error.message });
+    }
+
+    const fullText = annotation?.fullTextAnnotation?.text || "";
+    const pages = annotation?.fullTextAnnotation?.pages || [];
+
+    let totalConf = 0, wordCount = 0;
+    for (const page of pages) {
+      for (const block of (page.blocks || [])) {
+        for (const para of (block.paragraphs || [])) {
+          for (const word of (para.words || [])) {
+            if (word.confidence !== undefined) {
+              totalConf += word.confidence;
+              wordCount++;
+            }
+          }
+        }
+      }
+    }
+
+    const avgConfidence = wordCount > 0 ? Math.round((totalConf / wordCount) * 100) : null;
+    console.log(`[Vision] ✓ OCR complete: ${wordCount} words, ${avgConfidence}% confidence`);
+
+    res.json({
+      success: true,
+      fullText,
+      confidence: avgConfidence,
+      wordCount,
+    });
+
+  } catch (e) {
+    console.error("[Vision] Error:", e.message);
     res.status(500).json({ error: true, message: e.message });
   }
 });
@@ -610,6 +683,7 @@ app.listen(PORT, () => {
   console.log(`   GHL:        ${GHL_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Anthropic:  ${ANTHROPIC_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Drive:      ${GOOGLE_REFRESH_TOKEN ? "✓ configured" : "✗ NOT SET"}`);
+  console.log(`   Vision:     ${GCP_VISION_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Location:   ${GHL_LOCATION_ID || "NOT SET"}`);
   console.log(`   CORS:       ${ALLOWED_ORIGINS.join(", ")}\n`);
 });
