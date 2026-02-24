@@ -1,8 +1,8 @@
 // ============================================================
-// QUOTEIT API HUB — Railway Proxy Server v6.2
+// QUOTEIT API HUB — Railway Proxy Server v6.3
 // Routes: Compulife | GHL (CRM) | Anthropic (OCR) | Google Drive
 // Deploy: Railway with Static Egress IP
-// Updated: Feb 22, 2026 — Google Drive Upload for Lead Scanner Pro v2
+// Updated: Feb 24, 2026 — Fixed GHL V2 contact search endpoint
 // ============================================================
 
 const express = require("express");
@@ -57,7 +57,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "quoteit-api-hub",
-    version: "6.2.0",
+    version: "6.3.0",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
@@ -376,11 +376,12 @@ app.post("/ghl/contacts", async (req, res) => {
   } catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
+// ---- FIXED: V2 contact search uses /contacts/?query= instead of /contacts/search/duplicate ----
 app.get("/ghl/contacts/search", async (req, res) => {
   try {
     const q = req.query.query || req.query.q || "";
-    const field = q.includes("@") ? "email" : "phone";
-    const result = await ghlFetch("GET", `/contacts/search/duplicate?locationId=${GHL_LOCATION_ID}&${field}=${encodeURIComponent(q)}`);
+    const limit = req.query.limit || 20;
+    const result = await ghlFetch("GET", `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(q)}&limit=${limit}`);
     res.json(result);
   } catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
@@ -678,7 +679,7 @@ app.post("/anthropic", async (req, res) => {
 // START
 // ============================================================
 app.listen(PORT, () => {
-  console.log(`\n✅ QuoteIt API Hub v6.2 running on port ${PORT}`);
+  console.log(`\n✅ QuoteIt API Hub v6.3 running on port ${PORT}`);
   console.log(`   Compulife:  ${AUTH_ID ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   GHL:        ${GHL_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Anthropic:  ${ANTHROPIC_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
