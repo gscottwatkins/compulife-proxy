@@ -1,8 +1,8 @@
 // ============================================================
-// QUOTEIT API HUB — Railway Proxy Server v6.3
-// Routes: Compulife | GHL (CRM) | Anthropic (OCR) | Google Drive
+// QUOTEIT API HUB — Railway Proxy Server v7.0
+// Routes: Compulife | GHL (CRM) | Anthropic (AI) | Supabase | Google Drive
 // Deploy: Railway with Static Egress IP
-// Updated: Feb 24, 2026 — Fixed GHL V2 contact search endpoint
+// Updated: Feb 24, 2026 — Added Supabase lead image storage
 // ============================================================
 
 const express = require("express");
@@ -19,6 +19,11 @@ const GHL_API_KEY = process.env.GHL_API_KEY || "";
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "";
 const GHL_BASE = "https://services.leadconnectorhq.com";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
+
+// Supabase Config
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://bclpztdoneomugvrdxnb.supabase.co";
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "lead-images";
 
 // Google Drive Config
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
@@ -87,7 +92,13 @@ app.get("/", (req, res) => {
       "PUT    /ghl/opportunities/:id",
       "POST   /ghl/phone/call",
       "POST   /drive/upload",
+      "POST   /supabase/upload",
+      "GET    /supabase/signed-url?path=",
     ],
+    configured: {
+      ...{},
+      supabase: !!SUPABASE_SERVICE_KEY,
+    },
   });
 });
 
@@ -676,13 +687,125 @@ app.post("/anthropic", async (req, res) => {
 });
 
 // ============================================================
+// SUPABASE — Lead Image Storage (Private Bucket + Signed URLs)
+// ============================================================
+
+// Upload a lead page image to Supabase Storage
+app.post("/supabase/upload", async (req, res) => {
+  try {
+    if (!SUPABASE_SERVICE_KEY) {
+      return res.status(500).json({ error: true, message: "SUPABASE_SERVICE_KEY not configured" });
+    }
+
+    const { imageData, fileName, mimeType, folder } = req.body;
+    if (!imageData) return res.status(400).json({ error: true, message: "imageData (base64) required" });
+
+    // Build storage path: folder/fileName (e.g., "2026-02-24/veronica-laster.png")
+    const storagePath = folder ? `${folder}/${fileName}` : fileName;
+
+    // Decode base64 to buffer
+    const buffer = Buffer.from(imageData, "base64");
+
+    const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${storagePath}`;
+    console.log(`[Supabase] Uploading: ${storagePath} (${buffer.length} bytes)`);
+
+    const uploadResp = await fetch(uploadUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        "Content-Type": mimeType || "image/png",
+        "x-upsert": "true",
+      },
+      body: buffer,
+    });
+
+    const uploadData = await uploadResp.json();
+    if (!uploadResp.ok) {
+      console.error("[Supabase] Upload failed:", uploadData);
+      return res.status(uploadResp.status).json({
+        error: true,
+        message: uploadData.error || uploadData.message || "Upload failed",
+      });
+    }
+
+    console.log(`[Supabase] ✓ Uploaded: ${storagePath}`);
+    res.json({
+      success: true,
+      path: storagePath,
+      bucket: SUPABASE_BUCKET,
+      fullPath: `${SUPABASE_BUCKET}/${storagePath}`,
+    });
+  } catch (e) {
+    console.error("[Supabase] Upload error:", e.message);
+    res.status(500).json({ error: true, message: e.message });
+  }
+});
+
+// Generate a signed URL for viewing a lead image (expires in 1 hour)
+app.get("/supabase/signed-url", async (req, res) => {
+  try {
+    if (!SUPABASE_SERVICE_KEY) {
+      return res.status(500).json({ error: true, message: "SUPABASE_SERVICE_KEY not configured" });
+    }
+
+    const filePath = req.query.path;
+    if (!filePath) return res.status(400).json({ error: true, message: "path query param required" });
+
+    const expiresIn = parseInt(req.query.expires || "3600"); // Default 1 hour
+
+    const signUrl = `${SUPABASE_URL}/storage/v1/object/sign/${SUPABASE_BUCKET}/${filePath}`;
+    console.log(`[Supabase] Signing URL for: ${filePath}`);
+
+    const signResp = await fetch(signUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SUPABASE_SERVICE_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expiresIn }),
+    });
+
+    const signData = await signResp.json();
+    if (!signResp.ok) {
+      console.error("[Supabase] Sign failed:", signData);
+      return res.status(signResp.status).json({
+        error: true,
+        message: signData.error || signData.message || "Sign failed",
+      });
+    }
+
+    const signedUrl = signData.signedURL
+      ? `${SUPABASE_URL}/storage/v1${signData.signedURL}`
+      : signData.signedUrl
+        ? `${SUPABASE_URL}/storage/v1${signData.signedUrl}`
+        : null;
+
+    if (!signedUrl) {
+      return res.status(500).json({ error: true, message: "No signed URL returned", data: signData });
+    }
+
+    console.log(`[Supabase] ✓ Signed URL generated (${expiresIn}s)`);
+    res.json({
+      success: true,
+      signedUrl: signedUrl,
+      expiresIn: expiresIn,
+      path: filePath,
+    });
+  } catch (e) {
+    console.error("[Supabase] Sign error:", e.message);
+    res.status(500).json({ error: true, message: e.message });
+  }
+});
+
+// ============================================================
 // START
 // ============================================================
 app.listen(PORT, () => {
-  console.log(`\n✅ QuoteIt API Hub v6.3 running on port ${PORT}`);
+  console.log(`\n✅ QuoteIt API Hub v7.0 running on port ${PORT}`);
   console.log(`   Compulife:  ${AUTH_ID ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   GHL:        ${GHL_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Anthropic:  ${ANTHROPIC_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
+  console.log(`   Supabase:   ${SUPABASE_SERVICE_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Drive:      ${GOOGLE_REFRESH_TOKEN ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Vision:     ${GCP_VISION_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Location:   ${GHL_LOCATION_ID || "NOT SET"}`);
