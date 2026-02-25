@@ -1,8 +1,8 @@
 // ============================================================
-// QUOTEIT API HUB — Railway Proxy Server v6.5
+// QUOTEIT API HUB — Railway Proxy Server v6.6
 // Routes: Compulife | GHL (CRM) | Anthropic (OCR) | Google Drive
 // Deploy: Railway with Static Egress IP
-// Updated: Feb 25, 2026 — Expanded field whitelist, /sidebyside with NumberOfCompanies
+// Updated: Feb 25, 2026 — /request endpoint for all carriers + expanded whitelist
 // ============================================================
 
 const express = require("express");
@@ -57,7 +57,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "quoteit-api-hub",
-    version: "6.5.0",
+    version: "6.6.0",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
@@ -580,6 +580,7 @@ app.post("/", async (req, res) => {
         return res.json(await proxyPublic(`/ProductList/${encodeURIComponent(req.body.company)}`));
       }
       case "quote-sidebyside":
+        return res.json(await proxyPrivate("/sidebyside", buildCompulifeParams(req.body)));
       case "quote-compare":
         return res.json(await proxyPrivate("/sidebyside", buildCompulifeParams(req.body)));
       default:
@@ -711,7 +712,7 @@ app.post("/anthropic", async (req, res) => {
 // START
 // ============================================================
 app.listen(PORT, () => {
-  console.log(`\n✅ QuoteIt API Hub v6.5 running on port ${PORT}`);
+  console.log(`\n✅ QuoteIt API Hub v6.6 running on port ${PORT}`);
   console.log(`   Compulife:  ${AUTH_ID ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   GHL:        ${GHL_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Anthropic:  ${ANTHROPIC_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
