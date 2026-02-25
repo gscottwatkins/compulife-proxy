@@ -2,7 +2,7 @@
 // QUOTEIT API HUB — Railway Proxy Server v7.0
 // Routes: Compulife | GHL (CRM) | Anthropic (AI) | Supabase | Google Drive
 // Deploy: Railway with Static Egress IP
-// Updated: Feb 24, 2026 — Added Supabase lead image storage
+// Updated: Feb 24, 2026 — Fixed Compulife Health parameter
 // ============================================================
 
 const express = require("express");
@@ -62,12 +62,13 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "quoteit-api-hub",
-    version: "6.3.0",
+    version: "7.1.0",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
       ghl: !!GHL_API_KEY,
       anthropic: !!ANTHROPIC_API_KEY,
+      supabase: !!SUPABASE_SERVICE_KEY,
       googleDrive: !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
       googleVision: !!GCP_VISION_API_KEY,
     },
@@ -95,10 +96,6 @@ app.get("/", (req, res) => {
       "POST   /supabase/upload",
       "GET    /supabase/signed-url?path=",
     ],
-    configured: {
-      ...{},
-      supabase: !!SUPABASE_SERVICE_KEY,
-    },
   });
 });
 
@@ -137,7 +134,6 @@ let cachedAccessToken = null;
 let tokenExpiresAt = 0;
 
 async function getGoogleAccessToken() {
-  // Return cached token if still valid (with 60s buffer)
   if (cachedAccessToken && Date.now() < tokenExpiresAt - 60000) {
     return cachedAccessToken;
   }
@@ -167,7 +163,6 @@ async function getGoogleAccessToken() {
 }
 
 async function findOrCreateFolder(accessToken, folderName, parentId) {
-  // Search for existing folder
   const query = `name='${folderName.replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
   const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name)`;
 
@@ -180,7 +175,6 @@ async function findOrCreateFolder(accessToken, folderName, parentId) {
     return searchData.files[0].id;
   }
 
-  // Create folder
   console.log(`[Drive] Creating folder: ${folderName}`);
   const createResp = await fetch("https://www.googleapis.com/drive/v3/files", {
     method: "POST",
@@ -216,28 +210,22 @@ app.post("/drive/upload", async (req, res) => {
 
     const accessToken = await getGoogleAccessToken();
 
-    // Determine parent folder
     let parentFolderId = GOOGLE_DRIVE_FOLDER_ID;
-
-    // If no root folder configured, create "Lead Scanner Pro" in Drive root
     if (!parentFolderId) {
       parentFolderId = await findOrCreateFolder(accessToken, "Lead Scanner Pro", "root");
     }
 
-    // Create vendor subfolder if specified
     let targetFolderId = parentFolderId;
     if (vendorFolder) {
       targetFolderId = await findOrCreateFolder(accessToken, vendorFolder, parentFolderId);
     }
 
-    // Upload file using multipart upload
     const boundary = "lead_scanner_boundary_" + Date.now();
     const metadata = JSON.stringify({
       name: fileName || `lead_${Date.now()}.pdf`,
       parents: [targetFolderId],
     });
 
-    // Decode base64 to binary
     const fileBuffer = Buffer.from(fileData, "base64");
 
     const multipartBody = Buffer.concat([
@@ -276,7 +264,6 @@ app.post("/drive/upload", async (req, res) => {
       });
     }
 
-    // Make file viewable by anyone with the link
     await fetch(`https://www.googleapis.com/drive/v3/files/${uploadData.id}/permissions`, {
       method: "POST",
       headers: {
@@ -387,7 +374,6 @@ app.post("/ghl/contacts", async (req, res) => {
   } catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
-// ---- FIXED: V2 contact search uses /contacts/?query= instead of /contacts/search/duplicate ----
 app.get("/ghl/contacts/search", async (req, res) => {
   try {
     const q = req.query.query || req.query.q || "";
@@ -608,7 +594,7 @@ function buildCompulifeParams(body) {
   const fields = [
     "Province","Sex","Smoker","Birthdate","FaceAmount","Premium","Mode",
     "TermPeriod","TableRating","InquiryType","ResultType","NumberOfCompanies",
-    "Plan","DisplayFlags","DropCompanies","Alcohol","AlcoholYearsSinceTreatment",
+    "Plan","DisplayFlags","DropCompanies","Health","Alcohol","AlcoholYearsSinceTreatment",
     "Asthma","AsthmaRegularMedication","BloodPressure","BloodPressureMedication",
     "BPSystolic","BPDiastolic","Cancer","CancerType","CancerYearsSinceTreatment",
     "Cholesterol","CholesterolMedication","CholesterolReading","Diabetes",
@@ -632,6 +618,7 @@ async function proxyPrivate(path, params) {
   const payload = { COMPULIFEAUTHORIZATIONID: AUTH_ID, REMOTE_IP, ...params };
   const url = `${COMPULIFE_BASE}${path}/?COMPULIFE=${encodeURIComponent(JSON.stringify(payload))}`;
   console.log(`[Compulife] PRIVATE → ${COMPULIFE_BASE}${path}`);
+  console.log(`[Compulife] Params:`, JSON.stringify(params));
   const r = await fetch(url);
   const t = await r.text();
   try { return JSON.parse(t); } catch { return { raw: t, status: r.status }; }
@@ -644,15 +631,12 @@ app.post("/anthropic", async (req, res) => {
   try {
     if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
 
-    // Support both legacy format and new passthrough format
     const isPassthrough = req.body.model && req.body.messages;
 
     let body;
     if (isPassthrough) {
-      // New format: pass through the full Anthropic request
       body = JSON.stringify(req.body);
     } else {
-      // Legacy format: image + prompt
       const { image, media_type, prompt } = req.body;
       if (!image) return res.status(400).json({ error: "image (base64) required" });
       body = JSON.stringify({
@@ -689,8 +673,6 @@ app.post("/anthropic", async (req, res) => {
 // ============================================================
 // SUPABASE — Lead Image Storage (Private Bucket + Signed URLs)
 // ============================================================
-
-// Upload a lead page image to Supabase Storage
 app.post("/supabase/upload", async (req, res) => {
   try {
     if (!SUPABASE_SERVICE_KEY) {
@@ -700,10 +682,7 @@ app.post("/supabase/upload", async (req, res) => {
     const { imageData, fileName, mimeType, folder } = req.body;
     if (!imageData) return res.status(400).json({ error: true, message: "imageData (base64) required" });
 
-    // Build storage path: folder/fileName (e.g., "2026-02-24/veronica-laster.png")
     const storagePath = folder ? `${folder}/${fileName}` : fileName;
-
-    // Decode base64 to buffer
     const buffer = Buffer.from(imageData, "base64");
 
     const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${storagePath}`;
@@ -741,7 +720,6 @@ app.post("/supabase/upload", async (req, res) => {
   }
 });
 
-// Generate a signed URL for viewing a lead image (expires in 1 hour)
 app.get("/supabase/signed-url", async (req, res) => {
   try {
     if (!SUPABASE_SERVICE_KEY) {
@@ -751,7 +729,7 @@ app.get("/supabase/signed-url", async (req, res) => {
     const filePath = req.query.path;
     if (!filePath) return res.status(400).json({ error: true, message: "path query param required" });
 
-    const expiresIn = parseInt(req.query.expires || "3600"); // Default 1 hour
+    const expiresIn = parseInt(req.query.expires || "3600");
 
     const signUrl = `${SUPABASE_URL}/storage/v1/object/sign/${SUPABASE_BUCKET}/${filePath}`;
     console.log(`[Supabase] Signing URL for: ${filePath}`);
@@ -801,7 +779,7 @@ app.get("/supabase/signed-url", async (req, res) => {
 // START
 // ============================================================
 app.listen(PORT, () => {
-  console.log(`\n✅ QuoteIt API Hub v7.0 running on port ${PORT}`);
+  console.log(`\n✅ QuoteIt API Hub v7.1 running on port ${PORT}`);
   console.log(`   Compulife:  ${AUTH_ID ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   GHL:        ${GHL_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Anthropic:  ${ANTHROPIC_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
