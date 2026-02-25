@@ -1,8 +1,8 @@
 // ============================================================
-// QUOTEIT API HUB — Railway Proxy Server v6.3
+// QUOTEIT API HUB — Railway Proxy Server v6.5
 // Routes: Compulife | GHL (CRM) | Anthropic (OCR) | Google Drive
 // Deploy: Railway with Static Egress IP
-// Updated: Feb 24, 2026 — Fixed Compulife param whitelist
+// Updated: Feb 25, 2026 — Expanded field whitelist, /sidebyside with NumberOfCompanies
 // ============================================================
 
 const express = require("express");
@@ -57,7 +57,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "quoteit-api-hub",
-    version: "6.3.0",
+    version: "6.5.0",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
@@ -126,6 +126,7 @@ let cachedAccessToken = null;
 let tokenExpiresAt = 0;
 
 async function getGoogleAccessToken() {
+  // Return cached token if still valid (with 60s buffer)
   if (cachedAccessToken && Date.now() < tokenExpiresAt - 60000) {
     return cachedAccessToken;
   }
@@ -155,6 +156,7 @@ async function getGoogleAccessToken() {
 }
 
 async function findOrCreateFolder(accessToken, folderName, parentId) {
+  // Search for existing folder
   const query = `name='${folderName.replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
   const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name)`;
 
@@ -167,6 +169,7 @@ async function findOrCreateFolder(accessToken, folderName, parentId) {
     return searchData.files[0].id;
   }
 
+  // Create folder
   console.log(`[Drive] Creating folder: ${folderName}`);
   const createResp = await fetch("https://www.googleapis.com/drive/v3/files", {
     method: "POST",
@@ -202,22 +205,28 @@ app.post("/drive/upload", async (req, res) => {
 
     const accessToken = await getGoogleAccessToken();
 
+    // Determine parent folder
     let parentFolderId = GOOGLE_DRIVE_FOLDER_ID;
+
+    // If no root folder configured, create "Lead Scanner Pro" in Drive root
     if (!parentFolderId) {
       parentFolderId = await findOrCreateFolder(accessToken, "Lead Scanner Pro", "root");
     }
 
+    // Create vendor subfolder if specified
     let targetFolderId = parentFolderId;
     if (vendorFolder) {
       targetFolderId = await findOrCreateFolder(accessToken, vendorFolder, parentFolderId);
     }
 
+    // Upload file using multipart upload
     const boundary = "lead_scanner_boundary_" + Date.now();
     const metadata = JSON.stringify({
       name: fileName || `lead_${Date.now()}.pdf`,
       parents: [targetFolderId],
     });
 
+    // Decode base64 to binary
     const fileBuffer = Buffer.from(fileData, "base64");
 
     const multipartBody = Buffer.concat([
@@ -256,6 +265,7 @@ app.post("/drive/upload", async (req, res) => {
       });
     }
 
+    // Make file viewable by anyone with the link
     await fetch(`https://www.googleapis.com/drive/v3/files/${uploadData.id}/permissions`, {
       method: "POST",
       headers: {
@@ -570,10 +580,8 @@ app.post("/", async (req, res) => {
         return res.json(await proxyPublic(`/ProductList/${encodeURIComponent(req.body.company)}`));
       }
       case "quote-sidebyside":
-        return res.json(await proxyPrivate("/sidebyside", buildCompulifeParams(req.body)));
       case "quote-compare":
-      case "quote-compareall":
-        return res.json(await proxyPrivate("/compare", buildCompulifeParams(req.body)));
+        return res.json(await proxyPrivate("/sidebyside", buildCompulifeParams(req.body)));
       default:
         return res.status(400).json({ error: `Unknown action: ${action}` });
     }
@@ -585,21 +593,17 @@ app.post("/", async (req, res) => {
 
 function buildCompulifeParams(body) {
   const params = {};
-  // ══════════════════════════════════════════════════════════════
-  // FIXED Feb 24, 2026 — Added correct Compulife API field names
-  // The API accepts BOTH naming conventions:
-  //   Old: Province, Birthdate, Mode, TermPeriod
-  //   New: State, BirthMonth/Birthday/BirthYear, ModeUsed, NewCategory, Health
-  // Engine sends the "New" names which are the proven-working format
-  // ══════════════════════════════════════════════════════════════
   const fields = [
-    // Original fields (kept for backward compat)
-    "Province","Sex","Smoker","Birthdate","FaceAmount","Premium","Mode",
-    "TermPeriod","TableRating","InquiryType","ResultType","NumberOfCompanies",
+    // Core quote fields (legacy + current naming)
+    "Province","State","Sex","Smoker","Birthdate","BirthMonth","Birthday","BirthYear",
+    "FaceAmount","Premium","Mode","ModeUsed","Health",
+    "TermPeriod","NewCategory","Category",
+    "TableRating","InquiryType","ResultType","NumberOfCompanies",
     "Plan","DisplayFlags","DropCompanies",
-    // ── NEW: Correct Compulife /sidebyside field names (proven Feb 15) ──
-    "State","BirthMonth","Birthday","BirthYear","Health","NewCategory","ModeUsed",
-    // Health condition fields
+    // Sort/display options
+    "CompRating","SortOverride1","LANGUAGE","ZipCode","COMPINC","PRODDIS",
+    "ErrOnMissingZipCode","MaxNumResults",
+    // Health analyzer fields
     "Alcohol","AlcoholYearsSinceTreatment",
     "Asthma","AsthmaRegularMedication","BloodPressure","BloodPressureMedication",
     "BPSystolic","BPDiastolic","Cancer","CancerType","CancerYearsSinceTreatment",
@@ -607,8 +611,27 @@ function buildCompulifeParams(body) {
     "DiabetesType","DiabetesA1CReading","HeartDisease","HeartType",
     "HeartYearsSinceTreatment","Depression","DepressionYearsSinceTreatment",
     "Drugs","DrugsYearsSinceTreatment","EmbeddedAccums","EmbeddedAccumColor","NoRedX",
-    // Additional useful fields
-    "CompRating","SortOverride1","LANGUAGE",
+    // Smoking/Tobacco detail
+    "DoSmokingTobacco","DoCigarettes","PeriodCigarettes","NumCigarettes",
+    "DoCigars","PeriodCigars","NumCigars","DoPipe","PeriodPipe",
+    "DoChewingTobacco","PeriodChewingTobacco","DoNicotinePatchesOrGum","PeriodNicotinePatchesOrGum",
+    // Height/Weight
+    "DoHeightWeight","Weight","Feet","Inches",
+    // Blood Pressure detail
+    "DoBloodPressure","Systolic","Dystolic",
+    // Cholesterol detail
+    "DoCholesterol","CholesterolLevel","HDLRatio","PeriodCholesterol","PeriodCholesterolControlDuration",
+    // Driving
+    "DoDriving","HadDriversLicense",
+    "MovingViolations0","MovingViolations1","MovingViolations2","MovingViolations3","MovingViolations4",
+    "RecklessConviction","DwiConviction","SuspendedConviction","MoreThanOneAccident",
+    "PeriodRecklessConviction","PeriodDwiConviction","PeriodSuspendedConviction","PeriodMoreThanOneAccident",
+    // Family History
+    "DoFamily","NumDeaths","NumContracted",
+    "AgeDied00","AgeContracted00","IsParent00","CVD00","ColonCancer00",
+    "AgeContracted10","IsParent10","CVD10","ColonCancer10",
+    // Substance Abuse
+    "DoSubAbuse",
   ];
   for (const k of fields) { if (body[k] !== undefined) params[k] = String(body[k]); }
   return params;
@@ -625,9 +648,13 @@ async function proxyPublic(path) {
 async function proxyPrivate(path, params) {
   const payload = { COMPULIFEAUTHORIZATIONID: AUTH_ID, REMOTE_IP, ...params };
   const url = `${COMPULIFE_BASE}${path}/?COMPULIFE=${encodeURIComponent(JSON.stringify(payload))}`;
-  console.log(`[Compulife] PRIVATE → ${COMPULIFE_BASE}${path}`, JSON.stringify(params));
+  console.log(`[Compulife] PRIVATE → ${COMPULIFE_BASE}${path}`);
+  console.log(`[Compulife] Full URL length: ${url.length}`);
+  console.log(`[Compulife] Payload keys: ${Object.keys(payload).join(', ')}`);
   const r = await fetch(url);
+  console.log(`[Compulife] Response status: ${r.status}`);
   const t = await r.text();
+  console.log(`[Compulife] Response preview: ${t.substring(0, 200)}`);
   try { return JSON.parse(t); } catch { return { raw: t, status: r.status }; }
 }
 
@@ -638,12 +665,15 @@ app.post("/anthropic", async (req, res) => {
   try {
     if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
 
+    // Support both legacy format and new passthrough format
     const isPassthrough = req.body.model && req.body.messages;
 
     let body;
     if (isPassthrough) {
+      // New format: pass through the full Anthropic request
       body = JSON.stringify(req.body);
     } else {
+      // Legacy format: image + prompt
       const { image, media_type, prompt } = req.body;
       if (!image) return res.status(400).json({ error: "image (base64) required" });
       body = JSON.stringify({
@@ -681,7 +711,7 @@ app.post("/anthropic", async (req, res) => {
 // START
 // ============================================================
 app.listen(PORT, () => {
-  console.log(`\n✅ QuoteIt API Hub v6.3 running on port ${PORT}`);
+  console.log(`\n✅ QuoteIt API Hub v6.5 running on port ${PORT}`);
   console.log(`   Compulife:  ${AUTH_ID ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   GHL:        ${GHL_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Anthropic:  ${ANTHROPIC_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
