@@ -570,8 +570,10 @@ app.post("/", async (req, res) => {
         return res.json(await proxyPublic(`/ProductList/${encodeURIComponent(req.body.company)}`));
       }
       case "quote-sidebyside":
-      case "quote-compare":
         return res.json(await proxyPrivate("/sidebyside", buildCompulifeParams(req.body)));
+      case "quote-compare":
+      case "quote-compareall":
+        return res.json(await proxyPrivate("/compare", buildCompulifeParams(req.body)));
       default:
         return res.status(400).json({ error: `Unknown action: ${action}` });
     }
