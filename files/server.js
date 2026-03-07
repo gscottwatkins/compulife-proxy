@@ -707,6 +707,43 @@ app.post("/anthropic", async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════
+// AI Chat Proxy — shields Anthropic API key from frontend; frontend POSTs to /ai/chat
+// ═══════════════════════════════════════════════════════════════
+app.post("/ai/chat", async (req, res) => {
+  try {
+    if (!ANTHROPIC_API_KEY) {
+      return res.status(500).json({ error: "AI proxy error", detail: "ANTHROPIC_API_KEY not configured" });
+    }
+
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify(req.body),
+    });
+
+    const raw = await response.text();
+    let data;
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      data = { error: "Invalid JSON from Anthropic", detail: raw.slice(0, 200) };
+    }
+
+    if (!response.ok) {
+      return res.status(response.status).json(data);
+    }
+    res.json(data);
+  } catch (err) {
+    console.error("[AI Chat Proxy] Error:", err.message);
+    res.status(500).json({ error: "AI proxy error", detail: err.message });
+  }
+});
+
 // ============================================================
 // START
 // ============================================================
