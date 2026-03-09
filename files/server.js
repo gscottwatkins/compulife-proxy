@@ -1,8 +1,8 @@
 // ============================================================
-// QUOTEIT API HUB — Railway Proxy Server v6.5
-// Routes: Compulife | GHL (CRM) | Anthropic (OCR) | Google Drive
-// Deploy: Railway with Static Egress IP
-// Updated: Feb 25, 2026 — Expanded field whitelist, /sidebyside with NumberOfCompanies
+// iAgentIQ API HUB — Railway Proxy Server v7.0
+// Routes: Compulife | SMS (Telnyx) | Email (Postmark) | Anthropic | Google Drive
+// Deploy: Railway with Static Egress IP (162.220.232.99)
+// Updated: Mar 09, 2026 — Added Telnyx SMS + Postmark email routes; proprietary CRM
 // ============================================================
 
 const express = require("express");
@@ -15,10 +15,15 @@ const PORT = process.env.PORT || 3000;
 const AUTH_ID = process.env.COMPULIFE_AUTH_ID || "";
 const REMOTE_IP = process.env.REMOTE_IP || "162.220.232.99";
 const COMPULIFE_BASE = "https://www.compulifeapi.com/api";
-const GHL_API_KEY = process.env.GHL_API_KEY || "";
-const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "";
-const GHL_BASE = "https://services.leadconnectorhq.com";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
+
+// ---- Telnyx SMS ----
+const TELNYX_API_KEY  = process.env.TELNYX_API_KEY || "";
+const TELNYX_PHONE    = process.env.TELNYX_PHONE   || "+16016918436";
+
+// ---- Postmark Email ----
+const POSTMARK_API_KEY = process.env.POSTMARK_API_KEY || "";
+const FROM_EMAIL       = process.env.FROM_EMAIL       || "swatkins@quoteit.insure";
 
 // Google Drive Config
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
@@ -56,67 +61,43 @@ app.use(express.json({ limit: "10mb" }));
 app.get("/", (req, res) => {
   res.json({
     status: "ok",
-    service: "quoteit-api-hub",
-    version: "6.5.0",
+    service: "iagentiq-api-hub",
+    version: "7.0.0",
     timestamp: new Date().toISOString(),
     configured: {
-      compulife: !!AUTH_ID,
-      ghl: !!GHL_API_KEY,
-      anthropic: !!ANTHROPIC_API_KEY,
-      googleDrive: !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
+      compulife:    !!AUTH_ID,
+      anthropic:    !!ANTHROPIC_API_KEY,
+      googleDrive:  !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
       googleVision: !!GCP_VISION_API_KEY,
+      sms:          !!TELNYX_API_KEY,
+      email:        !!POSTMARK_API_KEY,
     },
-    ghl_endpoints: [
-      "POST   /ghl/contacts",
-      "GET    /ghl/contacts/search?query=",
-      "GET    /ghl/contacts/:id",
-      "PUT    /ghl/contacts/:id",
-      "POST   /ghl/contacts/:id/tags",
-      "POST   /ghl/contacts/:id/notes",
-      "POST   /ghl/contacts/:id/tasks",
-      "POST   /ghl/conversations/messages",
-      "GET    /ghl/conversations/:contactId",
-      "GET    /ghl/conversations/:id/messages",
-      "POST   /ghl/calendars/events",
-      "GET    /ghl/calendars/events",
-      "DELETE /ghl/calendars/events/:eventId",
-      "GET    /ghl/calendars",
-      "GET    /ghl/users",
-      "GET    /ghl/pipelines",
-      "POST   /ghl/opportunities",
-      "PUT    /ghl/opportunities/:id",
-      "POST   /ghl/phone/call",
+    endpoints: [
+      "POST   /compulife/quote",
+      "POST   /compulife/sidebyside",
+      "POST   /sms/send",
+      "POST   /sms/send-bulk",
+      "GET    /sms/status",
+      "POST   /email/send",
       "POST   /drive/upload",
+      "GET    /supabase/signed-url",
+      "POST   /supabase/upload",
+      "POST   /anthropic/vision",
+      "POST   /ai/chat",
     ],
   });
 });
 
 // ============================================================
-// GHL HELPER
+// PHONE NORMALIZE HELPER
 // ============================================================
-async function ghlFetch(method, path, body = null) {
-  const url = `${GHL_BASE}${path}`;
-  const opts = {
-    method,
-    headers: {
-      Authorization: `Bearer ${GHL_API_KEY}`,
-      "Content-Type": "application/json",
-      Version: "2021-07-28",
-    },
-  };
-  if (body && (method === "POST" || method === "PUT")) {
-    opts.body = JSON.stringify(body);
-  }
-  console.log(`[GHL] ${method} ${path}`);
-  const res = await fetch(url, opts);
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = { raw: text }; }
-  if (!res.ok) {
-    console.error(`[GHL] ${res.status}: ${text.substring(0, 300)}`);
-    return { error: true, status: res.status, message: data.message || data.msg || text.substring(0, 200), data };
-  }
-  return data;
+function normalizePhone(phone) {
+  if (!phone) return null;
+  const digits = String(phone).replace(/\D/g, "");
+  if (digits.length === 10) return "+1" + digits;
+  if (digits.length === 11 && digits[0] === "1") return "+" + digits;
+  if (digits.length > 10) return "+" + digits;
+  return null;
 }
 
 // ============================================================
@@ -745,15 +726,153 @@ app.post("/ai/chat", async (req, res) => {
 });
 
 // ============================================================
+// SMS — Telnyx
+// ============================================================
+
+// GET /sms/status — confirm SMS is configured
+app.get("/sms/status", (req, res) => {
+  res.json({
+    configured: !!TELNYX_API_KEY,
+    from: TELNYX_PHONE,
+    service: "telnyx",
+    status: TELNYX_API_KEY ? "ready" : "missing TELNYX_API_KEY",
+  });
+});
+
+// POST /sms/send — send single SMS
+// Body: { to, body, from (optional) }
+app.post("/sms/send", async (req, res) => {
+  const { to, body, from } = req.body || {};
+  if (!to || !body) {
+    return res.status(400).json({ success: false, error: "Missing required fields: to, body" });
+  }
+  const toClean = normalizePhone(to);
+  if (!toClean) {
+    return res.status(400).json({ success: false, error: "Invalid phone number format" });
+  }
+  if (!TELNYX_API_KEY) {
+    return res.status(500).json({ success: false, error: "TELNYX_API_KEY not configured" });
+  }
+  try {
+    const r = await fetch("https://api.telnyx.com/v2/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${TELNYX_API_KEY}`,
+      },
+      body: JSON.stringify({
+        from: from || TELNYX_PHONE,
+        to: toClean,
+        text: body,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      const errMsg = data?.errors?.[0]?.detail || data?.error || "Telnyx send failed";
+      console.error(`[SMS] Error to ${toClean}:`, errMsg);
+      return res.status(r.status).json({ success: false, error: errMsg });
+    }
+    console.log(`[SMS] Sent to ${toClean} | ID: ${data?.data?.id || "unknown"}`);
+    res.json({
+      success: true,
+      sid: data?.data?.id,
+      to: toClean,
+      status: data?.data?.to?.[0]?.status || "queued",
+    });
+  } catch (e) {
+    console.error("[SMS] Exception:", e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// POST /sms/send-bulk — send same message to multiple recipients
+// Body: { recipients: ['+16015551234', ...], body, from (optional) }
+app.post("/sms/send-bulk", async (req, res) => {
+  const { recipients, body, from } = req.body || {};
+  if (!recipients || !Array.isArray(recipients) || !body) {
+    return res.status(400).json({ success: false, error: "Missing required fields: recipients (array), body" });
+  }
+  const results = [];
+  for (const phone of recipients) {
+    const toClean = normalizePhone(phone);
+    if (!toClean) { results.push({ to: phone, success: false, error: "Invalid phone" }); continue; }
+    try {
+      const r = await fetch("https://api.telnyx.com/v2/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${TELNYX_API_KEY}` },
+        body: JSON.stringify({ from: from || TELNYX_PHONE, to: toClean, text: body }),
+      });
+      const data = await r.json();
+      if (r.ok) {
+        results.push({ to: toClean, success: true, sid: data?.data?.id });
+      } else {
+        results.push({ to: toClean, success: false, error: data?.errors?.[0]?.detail || "Send failed" });
+      }
+      await new Promise(resolve => setTimeout(resolve, 120)); // rate limit buffer
+    } catch (e) {
+      results.push({ to: toClean, success: false, error: e.message });
+    }
+  }
+  const sent = results.filter(r => r.success).length;
+  console.log(`[SMS] Bulk: ${sent}/${recipients.length} delivered`);
+  res.json({ success: true, sent, total: recipients.length, results });
+});
+
+// ============================================================
+// EMAIL — Postmark
+// ============================================================
+
+// POST /email/send — send transactional email
+// Body: { to, subject, html, text, replyTo (optional) }
+app.post("/email/send", async (req, res) => {
+  const { to, subject, html, text, replyTo } = req.body || {};
+  if (!to || !subject || (!html && !text)) {
+    return res.status(400).json({ success: false, error: "Missing required fields: to, subject, html or text" });
+  }
+  if (!POSTMARK_API_KEY) {
+    return res.status(500).json({ success: false, error: "POSTMARK_API_KEY not configured" });
+  }
+  try {
+    const r = await fetch("https://api.postmarkapp.com/email", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Postmark-Server-Token": POSTMARK_API_KEY,
+        "Accept": "application/json",
+      },
+      body: JSON.stringify({
+        From: FROM_EMAIL,
+        To: to,
+        Subject: subject,
+        HtmlBody: html || "",
+        TextBody: text || "",
+        ReplyTo: replyTo || FROM_EMAIL,
+        MessageStream: "outbound",
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      console.error("[EMAIL] Error:", data?.Message || data);
+      return res.status(r.status).json({ success: false, error: data?.Message || "Postmark send failed" });
+    }
+    console.log(`[EMAIL] Sent to ${to} | ID: ${data.MessageID}`);
+    res.json({ success: true, messageId: data.MessageID, to, subject });
+  } catch (e) {
+    console.error("[EMAIL] Exception:", e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ============================================================
 // START
 // ============================================================
 app.listen(PORT, () => {
-  console.log(`\n✅ QuoteIt API Hub v6.5 running on port ${PORT}`);
+  console.log(`\n✅ iAgentIQ API Hub v7.0 running on port ${PORT}`);
   console.log(`   Compulife:  ${AUTH_ID ? "✓ configured" : "✗ NOT SET"}`);
-  console.log(`   GHL:        ${GHL_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Anthropic:  ${ANTHROPIC_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
+  console.log(`   SMS/Telnyx: ${TELNYX_API_KEY ? "✓ configured (" + TELNYX_PHONE + ")" : "✗ NOT SET"}`);
+  console.log(`   Email/PM:   ${POSTMARK_API_KEY ? "✓ configured (" + FROM_EMAIL + ")" : "✗ NOT SET"}`);
   console.log(`   Drive:      ${GOOGLE_REFRESH_TOKEN ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Vision:     ${GCP_VISION_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
-  console.log(`   Location:   ${GHL_LOCATION_ID || "NOT SET"}`);
   console.log(`   CORS:       ${ALLOWED_ORIGINS.join(", ")}\n`);
 });
