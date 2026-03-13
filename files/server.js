@@ -582,6 +582,17 @@ app.post("/", async (req, res) => {
     console.error("[Compulife]", e.message);
     res.status(500).json({ error: true, message: e.message });
   }
+});// ══════════════════════════════════════════════════════════
+// COMPULIFE DIRECT QUOTE ROUTE
+// ══════════════════════════════════════════════════════════
+app.post("/compulife/quote", async (req, res) => {
+  try {
+    const result = await proxyPrivate("/request", req.body);
+    return res.json(result);
+  } catch (e) {
+    console.error("[Compulife/quote]", e.message);
+    res.status(500).json({ error: true, message: e.message });
+  }
 });
 
 function buildCompulifeParams(body) {
