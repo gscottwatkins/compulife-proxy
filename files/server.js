@@ -7,8 +7,19 @@
 
 const express = require("express");
 const cors = require("cors");
-
-const app = express();
+// ── CORS ──
+const corsOptions = {
+  origin: [
+    'https://iagentiq-quote-engine.gscottwatkins.workers.dev',
+    'https://quoteit.insure',
+    'http://localhost:3000'
+  ],
+  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization'],
+  credentials: true
+};
+const app = express();app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 const PORT = process.env.PORT || 3000;
 
 // ---- Config ----
