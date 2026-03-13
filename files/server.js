@@ -9,11 +9,12 @@ const express = require("express");
 const cors = require("cors");
 // ── CORS ──
 const corsOptions = {
-  origin: [
-    'https://iagentiq-quote-engine.gscottwatkins.workers.dev',
-    'https://quoteit.insure',
-    'http://localhost:3000'
-  ],
+origin: [
+  'https://iagentiq-quote-engine.gscottwatkins.workers.dev',
+  'https://quoteit.insure',
+  'https://engine.iagentiq.com',
+  'http://localhost:3000'
+],
   methods: ['GET','POST','PUT','DELETE','OPTIONS'],
   allowedHeaders: ['Content-Type','Authorization'],
   credentials: true
