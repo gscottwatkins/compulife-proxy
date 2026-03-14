@@ -899,3 +899,93 @@ app.listen(PORT, () => {
   console.log(`   Vision:     ${GCP_VISION_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   CORS:       ${ALLOWED_ORIGINS.join(", ")}\n`);
 });
+// ═══════════════════════════════════════════════════════════════
+// RAILWAY PROXY PATCH — zestful-education index.js
+//
+// INSTRUCTIONS:
+// 1. Open Railway → zestful-education → index.js
+// 2. Find your existing /compulife/quote route
+// 3. Paste this ENTIRE block right after it
+// 4. Save — Railway auto-deploys (~60 seconds)
+// 5. iAgentIQ → My Account → Admin Tools → Compulife Product Inspector
+//    → Click "Fetch via Railway Proxy" — all 12 carriers populate
+// ═══════════════════════════════════════════════════════════════
+
+const COMPULIFE_AUTH_ID = '6c1B02Df8';
+const COMPULIFE_API_BASE = 'https://compulifeapi.com/api';
+
+// ── POST /compulife/products ─────────────────────────────────
+// Auth goes as QUERY PARAM per Compulife curl docs:
+// curl POST /api/CompanyProductList?COMPULIFEAUTHORIZATIONID=xxx
+app.post('/compulife/products', async (req, res) => {
+  try {
+    const { CompanyCode, Category } = req.body;
+    const url = `${COMPULIFE_API_BASE}/CompanyProductList?COMPULIFEAUTHORIZATIONID=${COMPULIFE_AUTH_ID}`;
+    console.log(`[compulife/products] ${CompanyCode} cat:${Category}`);
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'curl/7.55.1' },
+      body: JSON.stringify({ CompanyCode, Category })
+    });
+    const text = await r.text();
+    if (!r.ok) return res.status(r.status).json({ error: `Compulife ${r.status}`, raw: text.substring(0, 300) });
+    try { res.json(JSON.parse(text)); }
+    catch(e) { res.status(502).json({ error: 'Non-JSON from Compulife', raw: text.substring(0, 500) }); }
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── GET /compulife/products (browser test) ───────────────────
+// https://zestful-education-production-88e7.up.railway.app/compulife/products?CompanyCode=SENA&Category=6
+app.get('/compulife/products', async (req, res) => {
+  try {
+    const { CompanyCode, Category } = req.query;
+    const url = `${COMPULIFE_API_BASE}/CompanyProductList?COMPULIFEAUTHORIZATIONID=${COMPULIFE_AUTH_ID}`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'curl/7.55.1' },
+      body: JSON.stringify({ CompanyCode, Category })
+    });
+    const text = await r.text();
+    try { res.json(JSON.parse(text)); }
+    catch(e) { res.status(502).json({ error: 'Non-JSON', raw: text.substring(0, 500) }); }
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── GET /compulife/companies (logo lookup) ───────────────────
+// Returns company list with official logo URLs
+// https://zestful-education-production-88e7.up.railway.app/compulife/companies
+app.get('/compulife/companies', async (req, res) => {
+  try {
+    const url = `${COMPULIFE_API_BASE}/GetCompanyList?COMPULIFEAUTHORIZATIONID=${COMPULIFE_AUTH_ID}`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'curl/7.55.1' },
+      body: JSON.stringify({})
+    });
+    const text = await r.text();
+    try { res.json(JSON.parse(text)); }
+    catch(e) { res.status(502).json({ error: 'Non-JSON', raw: text.substring(0, 500) }); }
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// QUICK BROWSER TESTS after deploying:
+//
+// Security National:
+// /compulife/products?CompanyCode=SENA&Category=6
+//
+// Combined Insurance:
+// /compulife/products?CompanyCode=COMB&Category=6
+//
+// Americo Financial:
+// /compulife/products?CompanyCode=AMSV&Category=5
+//
+// Foresters:
+// /compulife/products?CompanyCode=INDE&Category=5
+//
+// United of Omaha:
+// /compulife/products?CompanyCode=UTOM&Category=5
+//
+// Company list + logos:
+// /compulife/companies
+// ═══════════════════════════════════════════════════════════════
