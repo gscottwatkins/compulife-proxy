@@ -916,40 +916,42 @@ const COMPULIFE_API_BASE = 'https://compulifeapi.com/api';
 
 // ── POST /compulife/products ─────────────────────────────────
 // Auth goes as QUERY PARAM per Compulife curl docs:
-// curl POST /api/CompanyProductList?COMPULIFEAUTHORIZATIONID=xxx
 app.post('/compulife/products', async (req, res) => {
   try {
-    const { CompanyCode, Category } = req.body;
-    const url = `${COMPULIFE_API_BASE}/CompanyProductList?COMPULIFEAUTHORIZATIONID=${COMPULIFE_AUTH_ID}`;
-    console.log(`[compulife/products] ${CompanyCode} cat:${Category}`);
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'curl/7.55.1' },
-      body: JSON.stringify({ CompanyCode, Category })
+    const body = {
+      COMPULIFEAUTHORIZATIONID: '6c1B02Df8',
+      CompanyCode: req.body.CompanyCode || '',
+      Category:    req.body.Category    || '',
+      LANGUAGE:    'E'
+    };
+    const r = await fetch('https://www.compulifeapi.com/api/CompanyProductList', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body)
     });
     const text = await r.text();
-    if (!r.ok) return res.status(r.status).json({ error: `Compulife ${r.status}`, raw: text.substring(0, 300) });
+    console.log('[/compulife/products]', r.status, text.substring(0, 120));
     try { res.json(JSON.parse(text)); }
-    catch(e) { res.status(502).json({ error: 'Non-JSON from Compulife', raw: text.substring(0, 500) }); }
+    catch(e) { res.status(502).json({ error: 'Non-JSON', status: r.status, raw: text.substring(0, 400) }); }
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
-// ── GET /compulife/products (browser test) ───────────────────
-// https://zestful-education-production-88e7.up.railway.app/compulife/products?CompanyCode=SENA&Category=6
 app.get('/compulife/products', async (req, res) => {
   try {
-    const { CompanyCode, Category } = req.query;
-    const url = `${COMPULIFE_API_BASE}/CompanyProductList?COMPULIFEAUTHORIZATIONID=${COMPULIFE_AUTH_ID}`;
-    const r = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'curl/7.55.1' },
-      body: JSON.stringify({ CompanyCode, Category })
+    const body = {
+      COMPULIFEAUTHORIZATIONID: '6c1B02Df8',
+      CompanyCode: req.query.CompanyCode || '',
+      Category:    req.query.Category    || '',
+      LANGUAGE:    'E'
+    };
+    const r = await fetch('https://www.compulifeapi.com/api/CompanyProductList', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body)
     });
     const text = await r.text();
     try { res.json(JSON.parse(text)); }
-    catch(e) { res.status(502).json({ error: 'Non-JSON', raw: text.substring(0, 500) }); }
-  } catch(err) { res.status(500).json({ error: err.message }); }
-});
+    catch(e) { res.status(502).json({ error: 'Non-JSON', status:
 
 // ── GET /compulife/companies (logo lookup) ───────────────────
 // Returns company list with official logo URLs
