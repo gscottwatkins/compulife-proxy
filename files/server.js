@@ -916,43 +916,62 @@ const COMPULIFE_API_BASE = 'https://compulifeapi.com/api';
 
 // ── POST /compulife/products ─────────────────────────────────
 // Auth goes as QUERY PARAM per Compulife curl docs:
+// ═══════════════════════════════════════════════════════════════
+// REPLACE your /compulife/products routes in server.js with this
+// FIX: CompanyProductList is a GET endpoint, not POST
+// ═══════════════════════════════════════════════════════════════
+
 app.post('/compulife/products', async (req, res) => {
   try {
-    const body = {
+    const { CompanyCode, Category } = req.body;
+
+    // Compulife CompanyProductList = GET with query params
+    const params = new URLSearchParams({
       COMPULIFEAUTHORIZATIONID: '6c1B02Df8',
-      CompanyCode: req.body.CompanyCode || '',
-      Category:    req.body.Category    || '',
-      LANGUAGE:    'E'
-    };
-    const r = await fetch('https://www.compulifeapi.com/api/CompanyProductList', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(body)
+      CompanyCode: CompanyCode || '',
+      Category:    Category    || ''
     });
+
+    const url = `https://www.compulifeapi.com/api/CompanyProductList?${params}`;
+    console.log('[products] GET', url);
+
+    const r = await fetch(url, {
+      method:  'GET',
+      headers: { 'Accept': 'application/json' }
+    });
+
     const text = await r.text();
-    console.log('[/compulife/products]', r.status, text.substring(0, 120));
+    console.log('[products]', r.status, text.substring(0, 150));
+
     try { res.json(JSON.parse(text)); }
     catch(e) { res.status(502).json({ error: 'Non-JSON', status: r.status, raw: text.substring(0, 400) }); }
+
   } catch(err) { res.status(500).json({ error: err.message }); }
 });
 
 app.get('/compulife/products', async (req, res) => {
   try {
-    const body = {
+    const { CompanyCode, Category } = req.query;
+
+    const params = new URLSearchParams({
       COMPULIFEAUTHORIZATIONID: '6c1B02Df8',
-      CompanyCode: req.query.CompanyCode || '',
-      Category:    req.query.Category    || '',
-      LANGUAGE:    'E'
-    };
-    const r = await fetch('https://www.compulifeapi.com/api/CompanyProductList', {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(body)
+      CompanyCode: CompanyCode || '',
+      Category:    Category    || ''
     });
+
+    const url = `https://www.compulifeapi.com/api/CompanyProductList?${params}`;
+    const r = await fetch(url, {
+      method:  'GET',
+      headers: { 'Accept': 'application/json' }
+    });
+
     const text = await r.text();
     try { res.json(JSON.parse(text)); }
-    catch(e) { res.status(502).json({ error: 'Non-JSON', status:
+    catch(e) { res.status(502).json({ error: 'Non-JSON', status: r.status, raw: text.substring(0, 400) }); }
 
+  } catch(err) { res.status(500).json({ error: err.message }); }
+});
+// ═══════════════════════════════════════════════════════════════
 // ── GET /compulife/companies (logo lookup) ───────────────────
 // Returns company list with official logo URLs
 // https://zestful-education-production-88e7.up.railway.app/compulife/companies
