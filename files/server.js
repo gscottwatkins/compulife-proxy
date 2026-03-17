@@ -1010,3 +1010,87 @@ app.get('/compulife/companies', async (req, res) => {
 // Company list + logos:
 // /compulife/companies
 // ═══════════════════════════════════════════════════════════════
+// =====================================================================
+// ADD THIS TO YOUR RAILWAY EXPRESS SERVER (zestful-education)
+// POST /scan-lead
+// Receives base64 PDF or image, sends to Claude, returns extracted fields
+// =====================================================================
+
+const Anthropic = require('@anthropic-ai/sdk');
+
+const anthropicClient = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY
+});
+
+app.post('/scan-lead', async (req, res) => {
+  const { file, mediaType, fileName } = req.body;
+
+  if (!file) return res.status(400).json({ error: 'No file provided' });
+
+  try {
+    const isPDF = mediaType === 'application/pdf';
+
+    const response = await anthropicClient.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1024,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: isPDF ? 'document' : 'image',
+            source: {
+              type: 'base64',
+              media_type: mediaType,
+              data: file
+            }
+          },
+          {
+            type: 'text',
+            text: `This is a mortgage protection or life insurance lead card from a lead vendor.
+Extract all available fields and return ONLY a JSON object with these exact keys (use null if not found):
+{
+  "firstName": "",
+  "lastName": "",
+  "phone": "",
+  "email": "",
+  "dob": "MM/DD/YYYY format if possible",
+  "address": "",
+  "city": "",
+  "state": "2-letter code",
+  "zip": "",
+  "mortgageAmount": "numbers only no $ or commas",
+  "lender": "",
+  "leadSource": "",
+  "coBorrowerFirstName": "",
+  "coBorrowerLastName": "",
+  "coBorrowerDob": ""
+}
+Return ONLY the JSON. No explanation, no markdown, no backticks.`
+          }
+        ]
+      }]
+    });
+
+    const raw = response.content[0].text.trim();
+
+    // Parse JSON safely
+    let lead;
+    try {
+      lead = JSON.parse(raw);
+    } catch(e) {
+      // Try to extract JSON from response
+      const match = raw.match(/\{[\s\S]*\}/);
+      if (match) {
+        lead = JSON.parse(match[0]);
+      } else {
+        throw new Error('Could not parse AI response');
+      }
+    }
+
+    res.json({ lead });
+
+  } catch(e) {
+    console.error('[scan-lead]', e);
+    res.status(500).json({ error: e.message || 'Scan failed' });
+  }
+});
