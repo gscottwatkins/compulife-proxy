@@ -937,7 +937,7 @@ app.post('/scan-lead', async (req, res) => {
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 1024,
+        max_tokens: 8000,
         messages: [{ role: 'user', content: imageBlocks }]
       })
     });
@@ -949,9 +949,22 @@ app.post('/scan-lead', async (req, res) => {
     const data = await response.json();
     const raw = (data.content && data.content[0] && data.content[0].text || '').trim();
     let result;
-    try { result = JSON.parse(raw); }
-    catch(e) { const m = raw.match(/[\[{][\s\S]*/); result = m ? JSON.parse(m[0]) : []; }
-    // Normalize to always return { leads: [...] }
+    try {
+      result = JSON.parse(raw);
+    } catch(e) {
+      // Try to extract a valid JSON array even if truncated
+      const arrMatch = raw.match(/\[[\s\S]*/);
+      if (arrMatch) {
+        let partial = arrMatch[0];
+        // Close any truncated array by finding last complete object
+        const lastClose = partial.lastIndexOf('}');
+        if (lastClose > 0) partial = partial.substring(0, lastClose + 1) + ']';
+        try { result = JSON.parse(partial); } catch(e2) { result = []; }
+      } else {
+        const objMatch = raw.match(/\{[\s\S]*\}/);
+        result = objMatch ? JSON.parse(objMatch[0]) : [];
+      }
+    }
     const leads = Array.isArray(result) ? result : [result];
     console.log('[scan-lead] Success:', leads.length, 'leads extracted');
     res.json({ leads, lead: leads[0] || {} });
