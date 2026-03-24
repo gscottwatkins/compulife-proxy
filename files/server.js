@@ -366,6 +366,30 @@ app.post("/vision/ocr", async (req, res) => {
 });
 
 // ============================================================
+// GHL — CONFIG + FETCH HELPER
+// ============================================================
+const GHL_API_KEY     = process.env.GHL_API_KEY     || "";
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "Vxh8nFzmk9qgBBiVoYFs";
+const GHL_BASE_URL    = "https://services.leadconnectorhq.com";
+
+async function ghlFetch(method, path, body) {
+  const url = GHL_BASE_URL + path;
+  const opts = {
+    method,
+    headers: {
+      "Authorization": `Bearer ${GHL_API_KEY}`,
+      "Content-Type":  "application/json",
+      "Version":       "2021-07-28"
+    }
+  };
+  if (body && method !== "GET") opts.body = JSON.stringify(body);
+  const r = await fetch(url, opts);
+  const text = await r.text();
+  try { return JSON.parse(text); }
+  catch(e) { return { error: true, status: r.status, raw: text.substring(0, 200) }; }
+}
+
+// ============================================================
 // GHL — CONTACTS
 // ============================================================
 app.post("/ghl/contacts", async (req, res) => {
