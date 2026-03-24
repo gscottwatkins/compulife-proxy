@@ -13,6 +13,8 @@ origin: [
   'https://iagentiq-quote-engine.gscottwatkins.workers.dev',
   'https://quoteit.insure',
   'https://engine.iagentiq.com',
+  'https://www.iagentiq.com',
+  'https://app.iagentiq.com',
   'http://localhost:3000'
 ],
   methods: ['GET','POST','PUT','DELETE','OPTIONS'],
@@ -48,10 +50,14 @@ const GCP_VISION_API_KEY = process.env.GCP_VISION_API_KEY || "";
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(",").map(s => s.trim())
   : [
-      "https://quoteitengine.com",
-      "https://www.quoteitengine.com",
+      "https://engine.iagentiq.com",
+      "https://www.iagentiq.com",
+      "https://app.iagentiq.com",
+      "https://iagentiq-quote-engine.gscottwatkins.workers.dev",
       "https://quoteit.insure",
       "https://www.quoteit.insure",
+      "https://quoteitengine.com",
+      "https://www.quoteitengine.com",
     ];
 
 app.use(cors({
@@ -703,7 +709,13 @@ app.post("/anthropic", async (req, res) => {
       body,
     });
 
-    const data = await r.json();
+    const text = await r.text();
+    let data;
+    try { data = JSON.parse(text); } catch(e) { data = { error: true, raw: text.substring(0, 200) }; }
+    if (!r.ok) {
+      console.error("[Anthropic] API error:", r.status, text.substring(0, 300));
+      return res.status(r.status).json(data);
+    }
     res.json(data);
   } catch (e) {
     console.error("[Anthropic]", e.message);
@@ -914,7 +926,7 @@ app.post('/scan-lead', async (req, res) => {
     }
     imageBlocks.push({
       type: 'text',
-      text: 'This is a mortgage protection insurance lead card — there may be multiple pages/images. Extract all fields across all pages and return ONLY a JSON object with these keys (empty string if not found): {"firstName":"","lastName":"","phone":"","email":"","dob":"MM/DD/YYYY","address":"","city":"","state":"2-letter","zip":"","mortgageAmount":"numbers only","lender":"","leadSource":"","coBorrowerFirstName":"","coBorrowerLastName":"","coBorrowerDob":"","tobaccoUse":"yes or no","gender":"Male or Female","monthlyPayment":"numbers only"}. Return ONLY the JSON, no markdown, no backticks, no explanation.'
+      text: 'This PDF contains multiple mortgage protection insurance lead cards, one per page or section. Extract ALL leads and return ONLY a JSON array where each element has these keys (empty string if not found): {"firstName":"","lastName":"","phone":"","email":"","dob":"MM/DD/YYYY","address":"","city":"","state":"2-letter","zip":"","mortgageAmount":"numbers only","lender":"","leadSource":"","coBorrowerFirstName":"","coBorrowerLastName":"","coBorrowerDob":"","tobaccoUse":"yes or no","gender":"Male or Female","monthlyPayment":"numbers only"}. Return ONLY the JSON array, no markdown, no backticks, no explanation. Example: [{"firstName":"John",...},{"firstName":"Jane",...}]'
     });
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -936,11 +948,13 @@ app.post('/scan-lead', async (req, res) => {
     }
     const data = await response.json();
     const raw = (data.content && data.content[0] && data.content[0].text || '').trim();
-    let lead;
-    try { lead = JSON.parse(raw); }
-    catch(e) { const m = raw.match(/\{[\s\S]*\}/); lead = m ? JSON.parse(m[0]) : {}; }
-    console.log('[scan-lead] Success:', JSON.stringify(lead).substring(0, 150));
-    res.json({ lead });
+    let result;
+    try { result = JSON.parse(raw); }
+    catch(e) { const m = raw.match(/[\[{][\s\S]*/); result = m ? JSON.parse(m[0]) : []; }
+    // Normalize to always return { leads: [...] }
+    const leads = Array.isArray(result) ? result : [result];
+    console.log('[scan-lead] Success:', leads.length, 'leads extracted');
+    res.json({ leads, lead: leads[0] || {} });
   } catch(e) {
     console.error('[scan-lead] Exception:', e.message);
     res.status(500).json({ error: e.message || 'Scan failed' });
