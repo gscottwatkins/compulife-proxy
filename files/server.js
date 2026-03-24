@@ -950,7 +950,7 @@ app.post('/scan-lead', async (req, res) => {
     }
     imageBlocks.push({
       type: 'text',
-      text: 'This PDF contains multiple mortgage protection insurance lead cards, one per page or section. Extract ALL leads and return ONLY a JSON array where each element has these keys (empty string if not found): {"firstName":"","lastName":"","phone":"","email":"","dob":"MM/DD/YYYY","address":"","city":"","state":"2-letter","zip":"","mortgageAmount":"numbers only","lender":"","leadSource":"","coBorrowerFirstName":"","coBorrowerLastName":"","coBorrowerDob":"","tobaccoUse":"yes or no","gender":"Male or Female","monthlyPayment":"numbers only"}. Return ONLY the JSON array, no markdown, no backticks, no explanation. Example: [{"firstName":"John",...},{"firstName":"Jane",...}]'
+      text: 'This PDF contains multiple mortgage protection insurance lead cards, one per page or section. Extract ALL leads and return ONLY a JSON array where each element has these keys (empty string if not found): {"firstName":"","lastName":"","phone":"","email":"","dob":"MM/DD/YYYY","address":"","city":"","state":"2-letter","zip":"","mortgageAmount":"numbers only","lender":"","leadSource":"","coBorrowerFirstName":"","coBorrowerLastName":"","coBorrowerDob":"","tobaccoUse":"yes or no","gender":"Male or Female","coBorrowerGender":"Male or Female","monthlyPayment":"numbers only"}. IMPORTANT: gender is the PRIMARY BORROWER\'s gender only. coBorrowerGender is the co-borrower\'s gender only. Do not mix them up. Return ONLY the JSON array, no markdown, no backticks, no explanation. Example: [{"firstName":"John",...},{"firstName":"Jane",...}]'
     });
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
