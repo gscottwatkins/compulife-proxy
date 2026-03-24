@@ -402,9 +402,16 @@ app.post("/ghl/contacts", async (req, res) => {
 app.get("/ghl/contacts/search", async (req, res) => {
   try {
     const q = req.query.query || req.query.q || "";
-    const field = q.includes("@") ? "email" : "phone";
-    const result = await ghlFetch("GET", `/contacts/search/duplicate?locationId=${GHL_LOCATION_ID}&${field}=${encodeURIComponent(q)}`);
-    res.json(result);
+    // Phone or email — use duplicate endpoint
+    if (q.match(/^\d/) || q.includes("@")) {
+      const field = q.includes("@") ? "email" : "phone";
+      const result = await ghlFetch("GET", `/contacts/search/duplicate?locationId=${GHL_LOCATION_ID}&${field}=${encodeURIComponent(q)}`);
+      res.json(result);
+    } else {
+      // Name search — use contacts search endpoint
+      const result = await ghlFetch("GET", `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(q)}&limit=10`);
+      res.json(result);
+    }
   } catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
