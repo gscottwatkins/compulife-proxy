@@ -13,24 +13,9 @@
 const express = require("express");
 const cors = require("cors");
 
-// ── CORS ──
-const corsOptions = {
-  origin: [
-    'https://iagentiq-quote-engine.gscottwatkins.workers.dev',
-    'https://quoteit.insure',
-    'https://engine.iagentiq.com',
-    'https://www.iagentiq.com',
-    'https://app.iagentiq.com',
-    'http://localhost:3000'
-  ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
-};
+// ── CORS — single source of truth, function-based check is below at line ~67 ──
 
 const app = express();
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
 const PORT = process.env.PORT || 3000;
 
 // ---- Config ----
@@ -66,13 +51,30 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
 
 app.use(cors({
   origin: function (origin, callback) {
+    // Allow no-origin requests (curl, Postman, server-to-server)
     if (!origin) return callback(null, true);
+    // Allow file:// pages — browser sends literal "null" string as Origin
+    if (origin === "null") return callback(null, true);
+    // Allow any localhost port (dev convenience)
+    if (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:")) {
+      return callback(null, true);
+    }
     if (ALLOWED_ORIGINS.indexOf(origin) !== -1) return callback(null, true);
     return callback(new Error("CORS: Origin " + origin + " not allowed"), false);
   },
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true,
+}));
+
+// Explicit preflight handler (mirrors the rules above)
+app.options("*", cors({
+  origin: function (origin, callback) {
+    if (!origin || origin === "null") return callback(null, true);
+    if (origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:")) return callback(null, true);
+    if (ALLOWED_ORIGINS.indexOf(origin) !== -1) return callback(null, true);
+    return callback(new Error("CORS preflight: Origin " + origin + " not allowed"), false);
+  },
 }));
 
 app.use(express.json({ limit: "10mb" }));
@@ -84,7 +86,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "iagentiq-api-hub",
-    version: "7.1.0",
+    version: "7.1.1",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
@@ -310,7 +312,7 @@ app.get("/compulife/products", async (req, res) => {
 app.get("/compulife/diag", async (req, res) => {
   try {
     const out = {
-      proxy_version: "7.1.0",
+      proxy_version: "7.1.1",
       auth_id_set: !!AUTH_ID,
       server_ip_configured: SERVER_IP_FALLBACK,
       caller_ip_seen: req.headers["x-forwarded-for"] || req.ip || "?",
@@ -834,7 +836,7 @@ app.post('/scan-lead', async (req, res) => {
 // START
 // ============================================================
 app.listen(PORT, () => {
-  console.log(`\n✅ iAgentIQ API Hub v7.1 running on port ${PORT}`);
+  console.log(`\n✅ iAgentIQ API Hub v7.1.1 running on port ${PORT}`);
   console.log(`   Compulife:  ${AUTH_ID ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Server IP:  ${SERVER_IP_FALLBACK}`);
   console.log(`   Anthropic:  ${ANTHROPIC_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
