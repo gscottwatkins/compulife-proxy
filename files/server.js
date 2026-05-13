@@ -1,43 +1,50 @@
 // ============================================================
-// iAgentIQ API HUB — Railway Proxy Server v7.0
+// iAgentIQ API HUB — Railway Proxy Server v7.1
 // Routes: Compulife | SMS (Telnyx) | Email (Postmark) | Anthropic | Google Drive
 // Deploy: Railway with Static Egress IP (162.220.232.99)
-// Updated: Mar 09, 2026 — Added Telnyx SMS + Postmark email routes; proprietary CRM
+// Updated: May 13, 2026 — Compulife proxy rewritten to match official API spec:
+//   - POST multipart/form-data (was: GET with JSON in query string)
+//   - REMOTE_IP passed per-request from caller (was: hardcoded server IP)
+//   - Auth + REMOTE_IP in URL query params, all other fields in formdata body
+//   - Diagnostic endpoint /compulife/diag for sanity checks
 // ============================================================
 
 const express = require("express");
 const cors = require("cors");
+
 // ── CORS ──
 const corsOptions = {
-origin: [
-  'https://iagentiq-quote-engine.gscottwatkins.workers.dev',
-  'https://quoteit.insure',
-  'https://engine.iagentiq.com',
-  'https://www.iagentiq.com',
-  'https://app.iagentiq.com',
-  'http://localhost:3000'
-],
-  methods: ['GET','POST','PUT','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization'],
+  origin: [
+    'https://iagentiq-quote-engine.gscottwatkins.workers.dev',
+    'https://quoteit.insure',
+    'https://engine.iagentiq.com',
+    'https://www.iagentiq.com',
+    'https://app.iagentiq.com',
+    'http://localhost:3000'
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 };
-const app = express();app.use(cors(corsOptions));
+
+const app = express();
+app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 const PORT = process.env.PORT || 3000;
 
 // ---- Config ----
 const AUTH_ID = process.env.COMPULIFE_AUTH_ID || "";
-const REMOTE_IP = process.env.REMOTE_IP || "162.220.232.99";
+const SERVER_IP_FALLBACK = process.env.REMOTE_IP || "162.220.232.99";
 const COMPULIFE_BASE = "https://www.compulifeapi.com/api";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
 // ---- Telnyx SMS ----
-const TELNYX_API_KEY  = process.env.TELNYX_API_KEY || "";
-const TELNYX_PHONE    = process.env.TELNYX_PHONE   || "+16016918436";
+const TELNYX_API_KEY = process.env.TELNYX_API_KEY || "";
+const TELNYX_PHONE = process.env.TELNYX_PHONE || "+16016918436";
 
 // ---- Postmark Email ----
 const POSTMARK_API_KEY = process.env.POSTMARK_API_KEY || "";
-const FROM_EMAIL       = process.env.FROM_EMAIL       || "swatkins@quoteit.insure";
+const FROM_EMAIL = process.env.FROM_EMAIL || "swatkins@quoteit.insure";
 
 // Google Drive Config
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
@@ -46,7 +53,7 @@ const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || "";
 const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 const GCP_VISION_API_KEY = process.env.GCP_VISION_API_KEY || "";
 
-// ---- CORS ----
+// ---- CORS (full origin list) ----
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(",").map(s => s.trim())
   : [
@@ -80,30 +87,290 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "iagentiq-api-hub",
-    version: "7.0.0",
+    version: "7.1.0",
     timestamp: new Date().toISOString(),
     configured: {
-      compulife:    !!AUTH_ID,
-      anthropic:    !!ANTHROPIC_API_KEY,
-      googleDrive:  !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
+      compulife: !!AUTH_ID,
+      anthropic: !!ANTHROPIC_API_KEY,
+      googleDrive: !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
       googleVision: !!GCP_VISION_API_KEY,
-      sms:          !!TELNYX_API_KEY,
-      email:        !!POSTMARK_API_KEY,
+      sms: !!TELNYX_API_KEY,
+      email: !!POSTMARK_API_KEY,
     },
     endpoints: [
       "POST   /compulife/quote",
       "POST   /compulife/sidebyside",
+      "GET    /compulife/diag",
+      "GET    /compulife/categories",
+      "GET    /compulife/companies",
       "POST   /sms/send",
       "POST   /sms/send-bulk",
       "GET    /sms/status",
       "POST   /email/send",
       "POST   /drive/upload",
-      "GET    /supabase/signed-url",
-      "POST   /supabase/upload",
-      "POST   /anthropic/vision",
+      "POST   /vision/ocr",
+      "POST   /anthropic",
       "POST   /ai/chat",
+      "POST   /scan-lead",
     ],
   });
+});
+
+// ============================================================
+// COMPULIFE — CORRECTED IMPLEMENTATION (v7.1)
+// ============================================================
+//
+// Per official docs at docs.compulife.com (verified May 13, 2026):
+//
+//   POST https://www.compulifeapi.com/api/request/?COMPULIFEAUTHORIZATIONID={ID}&REMOTE_IP={USER_IP}
+//   Content-Type: multipart/form-data
+//   Body: each quote field (State, BirthMonth, Sex, Health, NewCategory, etc.)
+//         as its own multipart form field, values quoted as strings.
+//
+// REMOTE_IP must be the END USER'S browser IP, not the server's, to keep
+// per-user rate limiting working. The engine captures the user's IP browser-side
+// and passes it in req.body.REMOTE_IP. Fall back to the server's IP only if
+// the caller didn't provide one (which should not happen in normal use).
+// ============================================================
+
+// Helper — build a multipart/form-data body from a plain object.
+// Node 18+ has native FormData; this works on Railway's default runtime.
+function buildFormData(fields) {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) {
+    // Compulife expects empty string for unused optional fields (not omitted)
+    form.append(key, value === undefined || value === null ? "" : String(value));
+  }
+  return form;
+}
+
+// The canonical 19 quote fields per Compulife docs (May 2026).
+// Anything not in this list is dropped — protects against the engine accidentally
+// sending stale field names (gender, tobacco, NumberOfCompanies, action, etc.).
+const COMPULIFE_QUOTE_FIELDS = [
+  "State", "ZipCode",
+  "BirthMonth", "Birthday", "BirthYear",
+  "ActualAge", "NearestAge",
+  "Sex", "Smoker", "Health",
+  "NewCategory", "FaceAmount", "ModeUsed",
+  "SortOverride1", "CompRating", "LANGUAGE",
+  "COMPINC", "PRODDIS", "MaxNumResults",
+  // Health Analyzer additions (optional, only used when DoHeightWeight=ON)
+  "DoHeightWeight", "Feet", "Inches", "Weight", "DoSmokingTobacco",
+];
+
+// Field-name aliasing — accept common legacy/incorrect names from the engine
+// and translate them to the documented names. This lets us keep older engine
+// code working while we migrate to the correct field names everywhere.
+const FIELD_ALIASES = {
+  gender: "Sex",
+  tobacco: "Smoker",
+  category: "NewCategory",
+  face: "FaceAmount",
+  mode: "ModeUsed",
+};
+
+function normalizeQuoteFields(body) {
+  const out = {};
+  // Apply aliases first so e.g. body.gender → body.Sex
+  for (const [from, to] of Object.entries(FIELD_ALIASES)) {
+    if (body[from] !== undefined && body[to] === undefined) {
+      out[to] = body[from];
+    }
+  }
+  // Then copy through canonical fields (overriding any alias values if both present)
+  for (const k of COMPULIFE_QUOTE_FIELDS) {
+    if (body[k] !== undefined) out[k] = body[k];
+  }
+  // Normalize Smoker: accept Y/N (canonical), S/N (legacy), or boolean
+  if (out.Smoker !== undefined) {
+    const v = String(out.Smoker).toUpperCase();
+    if (v === "S" || v === "Y" || v === "TRUE" || v === "1") out.Smoker = "Y";
+    else out.Smoker = "N";
+  }
+  // Normalize Sex
+  if (out.Sex !== undefined) {
+    const v = String(out.Sex).toUpperCase();
+    out.Sex = v.startsWith("F") ? "F" : "M";
+  }
+  return out;
+}
+
+// The new private quote call.
+//   userIp:  the END USER'S browser IP (passed up from the engine)
+//   fields:  the normalized quote fields (multipart formdata payload)
+async function callCompulifeQuote(userIp, fields, endpoint = "/request") {
+  if (!AUTH_ID) {
+    throw new Error("COMPULIFE_AUTH_ID env var not set on Railway");
+  }
+  const remoteIp = userIp || SERVER_IP_FALLBACK;
+  const url = `${COMPULIFE_BASE}${endpoint}/?COMPULIFEAUTHORIZATIONID=${encodeURIComponent(AUTH_ID)}&REMOTE_IP=${encodeURIComponent(remoteIp)}`;
+
+  const form = buildFormData(fields);
+
+  console.log(`[Compulife] POST ${endpoint}`);
+  console.log(`[Compulife]   REMOTE_IP: ${remoteIp}${userIp ? "" : " (FALLBACK — caller did not send user IP)"}`);
+  console.log(`[Compulife]   Fields: ${Object.keys(fields).length} (${Object.keys(fields).slice(0, 6).join(", ")}...)`);
+
+  const r = await fetch(url, {
+    method: "POST",
+    body: form,
+    // NOTE: do NOT set Content-Type manually — fetch sets the multipart boundary automatically
+  });
+
+  const responseText = await r.text();
+  console.log(`[Compulife]   Status: ${r.status}, response length: ${responseText.length}`);
+
+  let parsed;
+  try {
+    parsed = JSON.parse(responseText);
+  } catch (e) {
+    console.error("[Compulife]   Failed to parse JSON response:", responseText.substring(0, 400));
+    return { error: true, status: r.status, raw: responseText.substring(0, 400), parseError: e.message };
+  }
+  return parsed;
+}
+
+// Public (no-auth-needed-in-body) GETs — CategoryList, StateList, CompanyList, etc.
+// These still need the auth ID as a query parameter on the URL.
+async function callCompulifePublic(endpoint) {
+  if (!AUTH_ID) throw new Error("COMPULIFE_AUTH_ID env var not set on Railway");
+  const sep = endpoint.includes("?") ? "&" : "?";
+  const url = `${COMPULIFE_BASE}${endpoint}${sep}COMPULIFEAUTHORIZATIONID=${encodeURIComponent(AUTH_ID)}`;
+  console.log(`[Compulife] GET ${endpoint}`);
+  const r = await fetch(url);
+  const t = await r.text();
+  try { return JSON.parse(t); }
+  catch { return { raw: t, status: r.status }; }
+}
+
+// ─── PRIMARY QUOTE ENDPOINT ───
+// The engine calls this with all quote fields in the body, plus REMOTE_IP.
+app.post("/compulife/quote", async (req, res) => {
+  try {
+    const userIp = req.body.REMOTE_IP || req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || null;
+    const fields = normalizeQuoteFields(req.body);
+
+    // Basic validation — fail fast with a useful message instead of letting
+    // Compulife return a vague error.
+    const required = ["State", "BirthMonth", "Birthday", "BirthYear", "Sex", "Smoker", "Health", "NewCategory", "FaceAmount", "ModeUsed"];
+    const missing = required.filter(k => fields[k] === undefined || fields[k] === "");
+    if (missing.length) {
+      return res.status(400).json({
+        error: true,
+        message: `Missing required Compulife fields: ${missing.join(", ")}`,
+        received_keys: Object.keys(req.body),
+      });
+    }
+
+    const result = await callCompulifeQuote(userIp, fields, "/request");
+    return res.json(result);
+  } catch (e) {
+    console.error("[Compulife/quote] Error:", e.message);
+    res.status(500).json({ error: true, message: e.message });
+  }
+});
+
+// ─── SIDE-BY-SIDE COMPARISON ENDPOINT ───
+// Compulife's pre-formatted spreadsheet-style endpoint. Same field shape.
+app.post("/compulife/sidebyside", async (req, res) => {
+  try {
+    const userIp = req.body.REMOTE_IP || req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || null;
+    const fields = normalizeQuoteFields(req.body);
+    const result = await callCompulifeQuote(userIp, fields, "/sidebyside");
+    return res.json(result);
+  } catch (e) {
+    console.error("[Compulife/sidebyside] Error:", e.message);
+    res.status(500).json({ error: true, message: e.message });
+  }
+});
+
+// ─── REFERENCE LOOKUPS (cache these on engine boot) ───
+app.get("/compulife/categories", async (req, res) => {
+  try { res.json(await callCompulifePublic("/CategoryList")); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+app.get("/compulife/companies", async (req, res) => {
+  try { res.json(await callCompulifePublic("/CompanyList")); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+app.get("/compulife/states", async (req, res) => {
+  try { res.json(await callCompulifePublic("/StateList")); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+app.get("/compulife/products", async (req, res) => {
+  try {
+    const compinc = req.query.compinc ? `?COMPINC=${encodeURIComponent(req.query.compinc)}` : "";
+    res.json(await callCompulifePublic(`/CompanyProductList${compinc}`));
+  }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+// ─── DIAGNOSTIC ENDPOINT ───
+// Calls Compulife's /api/ip endpoint to verify our outbound IP matches what
+// they have whitelisted, and reports the configured state of the proxy.
+app.get("/compulife/diag", async (req, res) => {
+  try {
+    const out = {
+      proxy_version: "7.1.0",
+      auth_id_set: !!AUTH_ID,
+      server_ip_configured: SERVER_IP_FALLBACK,
+      caller_ip_seen: req.headers["x-forwarded-for"] || req.ip || "?",
+      compulife_sees_us_as: null,
+      whitelist_match: null,
+      timestamp: new Date().toISOString(),
+    };
+    // Ask Compulife what IP they see us coming from
+    try {
+      const r = await fetch(`${COMPULIFE_BASE}/ip/`);
+      const data = await r.json();
+      out.compulife_sees_us_as = data.IPADDRESS || data.ipaddress || JSON.stringify(data);
+      out.whitelist_match = (out.compulife_sees_us_as === SERVER_IP_FALLBACK);
+    } catch (e) {
+      out.compulife_sees_us_as = "ERROR: " + e.message;
+    }
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: true, message: e.message });
+  }
+});
+
+// ─── LEGACY COMPATIBILITY: POST / with action: "..." ───
+// The current engine code posts to the proxy root with an action field
+// (e.g. action: "quote-sidebyside"). Preserve that contract so we don't
+// break the live engine while we update the engine-side call shape.
+app.post("/", async (req, res) => {
+  try {
+    const action = (req.body || {}).action || "ping";
+    const userIp = req.body.REMOTE_IP || req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || null;
+    switch (action) {
+      case "ping":
+        return res.json({ status: "ok", service: "compulife-proxy", timestamp: new Date().toISOString() });
+      case "get-categories":
+        return res.json(await callCompulifePublic("/CategoryList"));
+      case "get-companies":
+        return res.json(await callCompulifePublic("/CompanyList"));
+      case "get-products": {
+        const compinc = req.body.company ? `?COMPINC=${encodeURIComponent(req.body.company)}` : "";
+        return res.json(await callCompulifePublic(`/CompanyProductList${compinc}`));
+      }
+      case "quote-sidebyside":
+      case "quote-compare":
+      case "quote": {
+        const fields = normalizeQuoteFields(req.body);
+        const endpoint = action === "quote-sidebyside" ? "/sidebyside" : "/request";
+        return res.json(await callCompulifeQuote(userIp, fields, endpoint));
+      }
+      default:
+        return res.status(400).json({ error: `Unknown action: ${action}` });
+    }
+  } catch (e) {
+    console.error("[Compulife/legacy]", e.message);
+    res.status(500).json({ error: true, message: e.message });
+  }
 });
 
 // ============================================================
@@ -125,11 +392,9 @@ let cachedAccessToken = null;
 let tokenExpiresAt = 0;
 
 async function getGoogleAccessToken() {
-  // Return cached token if still valid (with 60s buffer)
   if (cachedAccessToken && Date.now() < tokenExpiresAt - 60000) {
     return cachedAccessToken;
   }
-
   console.log("[Drive] Refreshing access token...");
   const resp = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
@@ -141,52 +406,29 @@ async function getGoogleAccessToken() {
       grant_type: "refresh_token",
     }),
   });
-
   const data = await resp.json();
   if (!resp.ok || !data.access_token) {
     console.error("[Drive] Token refresh failed:", data);
     throw new Error(`Failed to refresh Google token: ${data.error_description || data.error || "unknown"}`);
   }
-
   cachedAccessToken = data.access_token;
   tokenExpiresAt = Date.now() + (data.expires_in * 1000);
-  console.log("[Drive] Access token refreshed successfully");
   return cachedAccessToken;
 }
 
 async function findOrCreateFolder(accessToken, folderName, parentId) {
-  // Search for existing folder
   const query = `name='${folderName.replace(/'/g, "\\'")}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
   const searchUrl = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name)`;
-
-  const searchResp = await fetch(searchUrl, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  const searchResp = await fetch(searchUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
   const searchData = await searchResp.json();
-
-  if (searchData.files && searchData.files.length > 0) {
-    return searchData.files[0].id;
-  }
-
-  // Create folder
-  console.log(`[Drive] Creating folder: ${folderName}`);
+  if (searchData.files && searchData.files.length > 0) return searchData.files[0].id;
   const createResp = await fetch("https://www.googleapis.com/drive/v3/files", {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      name: folderName,
-      mimeType: "application/vnd.google-apps.folder",
-      parents: [parentId],
-    }),
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name: folderName, mimeType: "application/vnd.google-apps.folder", parents: [parentId] }),
   });
-
   const createData = await createResp.json();
-  if (!createResp.ok) {
-    throw new Error(`Failed to create folder: ${createData.error?.message || "unknown"}`);
-  }
+  if (!createResp.ok) throw new Error(`Failed to create folder: ${createData.error?.message || "unknown"}`);
   return createData.id;
 }
 
@@ -198,36 +440,16 @@ app.post("/drive/upload", async (req, res) => {
     if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) {
       return res.status(500).json({ error: true, message: "Google Drive not configured" });
     }
-
     const { fileData, fileName, mimeType, vendorFolder } = req.body;
     if (!fileData) return res.status(400).json({ error: true, message: "fileData (base64) required" });
-
     const accessToken = await getGoogleAccessToken();
-
-    // Determine parent folder
     let parentFolderId = GOOGLE_DRIVE_FOLDER_ID;
-
-    // If no root folder configured, create "Lead Scanner Pro" in Drive root
-    if (!parentFolderId) {
-      parentFolderId = await findOrCreateFolder(accessToken, "Lead Scanner Pro", "root");
-    }
-
-    // Create vendor subfolder if specified
+    if (!parentFolderId) parentFolderId = await findOrCreateFolder(accessToken, "Lead Scanner Pro", "root");
     let targetFolderId = parentFolderId;
-    if (vendorFolder) {
-      targetFolderId = await findOrCreateFolder(accessToken, vendorFolder, parentFolderId);
-    }
-
-    // Upload file using multipart upload
+    if (vendorFolder) targetFolderId = await findOrCreateFolder(accessToken, vendorFolder, parentFolderId);
     const boundary = "lead_scanner_boundary_" + Date.now();
-    const metadata = JSON.stringify({
-      name: fileName || `lead_${Date.now()}.pdf`,
-      parents: [targetFolderId],
-    });
-
-    // Decode base64 to binary
+    const metadata = JSON.stringify({ name: fileName || `lead_${Date.now()}.pdf`, parents: [targetFolderId] });
     const fileBuffer = Buffer.from(fileData, "base64");
-
     const multipartBody = Buffer.concat([
       Buffer.from(
         `--${boundary}\r\n` +
@@ -240,7 +462,6 @@ app.post("/drive/upload", async (req, res) => {
       fileBuffer,
       Buffer.from(`\r\n--${boundary}--`),
     ]);
-
     const uploadResp = await fetch(
       "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink,webContentLink",
       {
@@ -253,32 +474,13 @@ app.post("/drive/upload", async (req, res) => {
         body: multipartBody,
       }
     );
-
     const uploadData = await uploadResp.json();
-
-    if (!uploadResp.ok) {
-      console.error("[Drive] Upload failed:", uploadData);
-      return res.status(uploadResp.status).json({
-        error: true,
-        message: uploadData.error?.message || "Upload failed",
-      });
-    }
-
-    // Make file viewable by anyone with the link
+    if (!uploadResp.ok) return res.status(uploadResp.status).json({ error: true, message: uploadData.error?.message || "Upload failed" });
     await fetch(`https://www.googleapis.com/drive/v3/files/${uploadData.id}/permissions`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        role: "reader",
-        type: "anyone",
-      }),
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ role: "reader", type: "anyone" }),
     });
-
-    console.log(`[Drive] ✓ Uploaded: ${uploadData.name} → ${uploadData.webViewLink}`);
-
     res.json({
       success: true,
       fileId: uploadData.id,
@@ -287,7 +489,6 @@ app.post("/drive/upload", async (req, res) => {
       webContentLink: uploadData.webContentLink,
       driveUrl: `https://drive.google.com/file/d/${uploadData.id}/view`,
     });
-
   } catch (e) {
     console.error("[Drive] Error:", e.message);
     res.status(500).json({ error: true, message: e.message });
@@ -295,16 +496,14 @@ app.post("/drive/upload", async (req, res) => {
 });
 
 // ============================================================
-// GOOGLE VISION — OCR Proxy for Lead Scanner Pro
+// GOOGLE VISION — OCR
 // ============================================================
 app.post("/vision/ocr", async (req, res) => {
   try {
     const GCP_API_KEY = process.env.GCP_VISION_API_KEY || "";
     if (!GCP_API_KEY) return res.status(500).json({ error: true, message: "GCP_VISION_API_KEY not configured" });
-
-    const { imageData, mimeType } = req.body;
+    const { imageData } = req.body;
     if (!imageData) return res.status(400).json({ error: true, message: "imageData (base64) required" });
-
     const url = `https://vision.googleapis.com/v1/images:annotate?key=${GCP_API_KEY}`;
     const body = {
       requests: [{
@@ -313,52 +512,25 @@ app.post("/vision/ocr", async (req, res) => {
         imageContext: { languageHints: ["en"] },
       }],
     };
-
-    console.log("[Vision] Processing OCR request...");
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
+    const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const result = await resp.json();
-    if (!resp.ok) {
-      console.error("[Vision] API error:", result);
-      return res.status(resp.status).json({ error: true, message: result.error?.message || "Vision API error" });
-    }
-
+    if (!resp.ok) return res.status(resp.status).json({ error: true, message: result.error?.message || "Vision API error" });
     const annotation = result.responses?.[0];
-    if (annotation?.error) {
-      return res.status(400).json({ error: true, message: annotation.error.message });
-    }
-
+    if (annotation?.error) return res.status(400).json({ error: true, message: annotation.error.message });
     const fullText = annotation?.fullTextAnnotation?.text || "";
     const pages = annotation?.fullTextAnnotation?.pages || [];
-
     let totalConf = 0, wordCount = 0;
     for (const page of pages) {
       for (const block of (page.blocks || [])) {
         for (const para of (block.paragraphs || [])) {
           for (const word of (para.words || [])) {
-            if (word.confidence !== undefined) {
-              totalConf += word.confidence;
-              wordCount++;
-            }
+            if (word.confidence !== undefined) { totalConf += word.confidence; wordCount++; }
           }
         }
       }
     }
-
     const avgConfidence = wordCount > 0 ? Math.round((totalConf / wordCount) * 100) : null;
-    console.log(`[Vision] ✓ OCR complete: ${wordCount} words, ${avgConfidence}% confidence`);
-
-    res.json({
-      success: true,
-      fullText,
-      confidence: avgConfidence,
-      wordCount,
-    });
-
+    res.json({ success: true, fullText, confidence: avgConfidence, wordCount });
   } catch (e) {
     console.error("[Vision] Error:", e.message);
     res.status(500).json({ error: true, message: e.message });
@@ -368,9 +540,9 @@ app.post("/vision/ocr", async (req, res) => {
 // ============================================================
 // GHL — CONFIG + FETCH HELPER
 // ============================================================
-const GHL_API_KEY     = process.env.GHL_API_KEY     || "";
-const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "Vxh8nFzmk9qgBBiVoYFs";
-const GHL_BASE_URL    = "https://services.leadconnectorhq.com";
+const GHL_API_KEY = process.env.GHL_API_KEY || "";
+const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "tOhI6SGWSB1guLHKIIqX";
+const GHL_BASE_URL = "https://services.leadconnectorhq.com";
 
 async function ghlFetch(method, path, body) {
   const url = GHL_BASE_URL + path;
@@ -378,110 +550,83 @@ async function ghlFetch(method, path, body) {
     method,
     headers: {
       "Authorization": `Bearer ${GHL_API_KEY}`,
-      "Content-Type":  "application/json",
-      "Version":       "2021-07-28"
+      "Content-Type": "application/json",
+      "Version": "2021-07-28"
     }
   };
   if (body && method !== "GET") opts.body = JSON.stringify(body);
   const r = await fetch(url, opts);
   const text = await r.text();
   try { return JSON.parse(text); }
-  catch(e) { return { error: true, status: r.status, raw: text.substring(0, 200) }; }
+  catch (e) { return { error: true, status: r.status, raw: text.substring(0, 200) }; }
 }
 
 // ============================================================
 // GHL — CONTACTS
 // ============================================================
 app.post("/ghl/contacts", async (req, res) => {
-  try {
-    const result = await ghlFetch("POST", "/contacts/", { ...req.body, locationId: GHL_LOCATION_ID });
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("POST", "/contacts/", { ...req.body, locationId: GHL_LOCATION_ID })); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.get("/ghl/contacts/search", async (req, res) => {
   try {
     const q = req.query.query || req.query.q || "";
-    // Phone or email — use duplicate endpoint
     if (q.match(/^\d/) || q.includes("@")) {
       const field = q.includes("@") ? "email" : "phone";
-      const result = await ghlFetch("GET", `/contacts/search/duplicate?locationId=${GHL_LOCATION_ID}&${field}=${encodeURIComponent(q)}`);
-      res.json(result);
+      res.json(await ghlFetch("GET", `/contacts/search/duplicate?locationId=${GHL_LOCATION_ID}&${field}=${encodeURIComponent(q)}`));
     } else {
-      // Name search — use contacts search endpoint
-      const result = await ghlFetch("GET", `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(q)}&limit=10`);
-      res.json(result);
+      res.json(await ghlFetch("GET", `/contacts/?locationId=${GHL_LOCATION_ID}&query=${encodeURIComponent(q)}&limit=10`));
     }
   } catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.get("/ghl/contacts/:id", async (req, res) => {
-  try {
-    const result = await ghlFetch("GET", `/contacts/${req.params.id}`);
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("GET", `/contacts/${req.params.id}`)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.put("/ghl/contacts/:id", async (req, res) => {
-  try {
-    const result = await ghlFetch("PUT", `/contacts/${req.params.id}`, req.body);
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("PUT", `/contacts/${req.params.id}`, req.body)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.post("/ghl/contacts/:id/tags", async (req, res) => {
-  try {
-    const result = await ghlFetch("POST", `/contacts/${req.params.id}/tags`, req.body);
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("POST", `/contacts/${req.params.id}/tags`, req.body)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.post("/ghl/contacts/:id/notes", async (req, res) => {
-  try {
-    const result = await ghlFetch("POST", `/contacts/${req.params.id}/notes`, {
-      body: req.body.body || req.body.note, userId: req.body.userId,
-    });
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("POST", `/contacts/${req.params.id}/notes`, { body: req.body.body || req.body.note, userId: req.body.userId })); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.post("/ghl/contacts/:id/tasks", async (req, res) => {
-  try {
-    const result = await ghlFetch("POST", `/contacts/${req.params.id}/tasks`, req.body);
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("POST", `/contacts/${req.params.id}/tasks`, req.body)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 // ============================================================
 // GHL — CONVERSATIONS / MESSAGING
 // ============================================================
 app.get("/ghl/conversations/:contactId", async (req, res) => {
-  try {
-    const result = await ghlFetch("GET", `/conversations/search?locationId=${GHL_LOCATION_ID}&contactId=${req.params.contactId}`);
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("GET", `/conversations/search?locationId=${GHL_LOCATION_ID}&contactId=${req.params.contactId}`)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.get("/ghl/conversations/:conversationId/messages", async (req, res) => {
-  try {
-    const result = await ghlFetch("GET", `/conversations/${req.params.conversationId}/messages`);
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("GET", `/conversations/${req.params.conversationId}/messages`)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.post("/ghl/conversations/messages", async (req, res) => {
   try {
-    const payload = {
-      type: req.body.type || "SMS",
-      contactId: req.body.contactId,
-      message: req.body.message,
-    };
+    const payload = { type: req.body.type || "SMS", contactId: req.body.contactId, message: req.body.message };
     if (req.body.subject) payload.subject = req.body.subject;
     if (req.body.html) payload.html = req.body.html;
     if (req.body.emailFrom) payload.emailFrom = req.body.emailFrom;
     if (req.body.attachments) payload.attachments = req.body.attachments;
-    const result = await ghlFetch("POST", "/conversations/messages", payload);
-    res.json(result);
+    res.json(await ghlFetch("POST", "/conversations/messages", payload));
   } catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
@@ -489,10 +634,8 @@ app.post("/ghl/conversations/messages", async (req, res) => {
 // GHL — CALENDAR / APPOINTMENTS
 // ============================================================
 app.get("/ghl/calendars", async (req, res) => {
-  try {
-    const result = await ghlFetch("GET", `/calendars/?locationId=${GHL_LOCATION_ID}`);
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("GET", `/calendars/?locationId=${GHL_LOCATION_ID}`)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.get("/ghl/calendars/events", async (req, res) => {
@@ -502,8 +645,7 @@ app.get("/ghl/calendars/events", async (req, res) => {
     if (calendarId) path += `&calendarId=${calendarId}`;
     if (startTime) path += `&startTime=${encodeURIComponent(startTime)}`;
     if (endTime) path += `&endTime=${encodeURIComponent(endTime)}`;
-    const result = await ghlFetch("GET", path);
-    res.json(result);
+    res.json(await ghlFetch("GET", path));
   } catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
@@ -520,40 +662,30 @@ app.post("/ghl/calendars/events", async (req, res) => {
       assignedUserId: req.body.assignedUserId || req.body.closerId,
       notes: req.body.notes || "",
     };
-    const result = await ghlFetch("POST", "/calendars/events", payload);
-    res.json(result);
+    res.json(await ghlFetch("POST", "/calendars/events", payload));
   } catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.delete("/ghl/calendars/events/:eventId", async (req, res) => {
-  try {
-    const result = await ghlFetch("DELETE", `/calendars/events/${req.params.eventId}`);
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("DELETE", `/calendars/events/${req.params.eventId}`)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 // ============================================================
-// GHL — PHONE (Click-to-Dial)
+// GHL — PHONE
 // ============================================================
 app.post("/ghl/phone/call", async (req, res) => {
   try {
     const contactId = req.body.contactId;
     const phone = req.body.phone;
-
     let ghlResult = null;
     if (contactId) {
       ghlResult = await ghlFetch("POST", "/conversations/messages", {
-        type: "Call",
-        contactId: contactId,
-        message: `Outbound call initiated to ${phone}`,
+        type: "Call", contactId: contactId, message: `Outbound call initiated to ${phone}`,
       });
     }
-
     res.json({
-      success: true,
-      action: "dial",
-      phone: phone,
-      contactId: contactId,
+      success: true, action: "dial", phone: phone, contactId: contactId,
       telUri: `tel:${phone.replace(/[^+\d]/g, "")}`,
       ghlLog: ghlResult,
       note: "Frontend should open tel: URI or GHL softphone widget",
@@ -565,156 +697,36 @@ app.post("/ghl/phone/call", async (req, res) => {
 // GHL — USERS / PIPELINES / OPPORTUNITIES
 // ============================================================
 app.get("/ghl/users", async (req, res) => {
-  try {
-    const result = await ghlFetch("GET", `/users/?locationId=${GHL_LOCATION_ID}`);
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("GET", `/users/?locationId=${GHL_LOCATION_ID}`)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.get("/ghl/pipelines", async (req, res) => {
-  try {
-    const result = await ghlFetch("GET", `/opportunities/pipelines?locationId=${GHL_LOCATION_ID}`);
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("GET", `/opportunities/pipelines?locationId=${GHL_LOCATION_ID}`)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.post("/ghl/opportunities", async (req, res) => {
-  try {
-    const result = await ghlFetch("POST", "/opportunities/", { ...req.body, locationId: GHL_LOCATION_ID });
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("POST", "/opportunities/", { ...req.body, locationId: GHL_LOCATION_ID })); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.put("/ghl/opportunities/:id", async (req, res) => {
-  try {
-    const result = await ghlFetch("PUT", `/opportunities/${req.params.id}`, req.body);
-    res.json(result);
-  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+  try { res.json(await ghlFetch("PUT", `/opportunities/${req.params.id}`, req.body)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 // ============================================================
-// COMPULIFE ROUTES
-// ============================================================
-app.post("/", async (req, res) => {
-  try {
-    const action = (req.body || {}).action || "ping";
-    switch (action) {
-      case "ping":
-        return res.json({ status: "ok", service: "compulife-proxy", timestamp: new Date().toISOString() });
-      case "get-categories":
-        return res.json(await proxyPublic("/CategoryList"));
-      case "get-companies":
-        return res.json(await proxyPublic(`/CompanyList/${encodeURIComponent(req.body.category || "Life")}`));
-      case "get-products": {
-        if (!req.body.company) return res.status(400).json({ error: "company required" });
-        return res.json(await proxyPublic(`/ProductList/${encodeURIComponent(req.body.company)}`));
-      }
-      case "quote-sidebyside":
-      case "quote-compare":
-        return res.json(await proxyPrivate("/sidebyside", buildCompulifeParams(req.body)));
-      default:
-        return res.status(400).json({ error: `Unknown action: ${action}` });
-    }
-  } catch (e) {
-    console.error("[Compulife]", e.message);
-    res.status(500).json({ error: true, message: e.message });
-  }
-});// ══════════════════════════════════════════════════════════
-// COMPULIFE DIRECT QUOTE ROUTE
-// ══════════════════════════════════════════════════════════
-app.post("/compulife/quote", async (req, res) => {
-  try {
-    const result = await proxyPrivate("/request", req.body);
-    return res.json(result);
-  } catch (e) {
-    console.error("[Compulife/quote]", e.message);
-    res.status(500).json({ error: true, message: e.message });
-  }
-});
-
-function buildCompulifeParams(body) {
-  const params = {};
-  const fields = [
-    // Core quote fields (legacy + current naming)
-    "Province","State","Sex","Smoker","Birthdate","BirthMonth","Birthday","BirthYear",
-    "FaceAmount","Premium","Mode","ModeUsed","Health",
-    "TermPeriod","NewCategory","Category",
-    "TableRating","InquiryType","ResultType","NumberOfCompanies",
-    "Plan","DisplayFlags","DropCompanies",
-    // Sort/display options
-    "CompRating","SortOverride1","LANGUAGE","ZipCode","COMPINC","PRODDIS",
-    "ErrOnMissingZipCode","MaxNumResults",
-    // Health analyzer fields
-    "Alcohol","AlcoholYearsSinceTreatment",
-    "Asthma","AsthmaRegularMedication","BloodPressure","BloodPressureMedication",
-    "BPSystolic","BPDiastolic","Cancer","CancerType","CancerYearsSinceTreatment",
-    "Cholesterol","CholesterolMedication","CholesterolReading","Diabetes",
-    "DiabetesType","DiabetesA1CReading","HeartDisease","HeartType",
-    "HeartYearsSinceTreatment","Depression","DepressionYearsSinceTreatment",
-    "Drugs","DrugsYearsSinceTreatment","EmbeddedAccums","EmbeddedAccumColor","NoRedX",
-    // Smoking/Tobacco detail
-    "DoSmokingTobacco","DoCigarettes","PeriodCigarettes","NumCigarettes",
-    "DoCigars","PeriodCigars","NumCigars","DoPipe","PeriodPipe",
-    "DoChewingTobacco","PeriodChewingTobacco","DoNicotinePatchesOrGum","PeriodNicotinePatchesOrGum",
-    // Height/Weight
-    "DoHeightWeight","Weight","Feet","Inches",
-    // Blood Pressure detail
-    "DoBloodPressure","Systolic","Dystolic",
-    // Cholesterol detail
-    "DoCholesterol","CholesterolLevel","HDLRatio","PeriodCholesterol","PeriodCholesterolControlDuration",
-    // Driving
-    "DoDriving","HadDriversLicense",
-    "MovingViolations0","MovingViolations1","MovingViolations2","MovingViolations3","MovingViolations4",
-    "RecklessConviction","DwiConviction","SuspendedConviction","MoreThanOneAccident",
-    "PeriodRecklessConviction","PeriodDwiConviction","PeriodSuspendedConviction","PeriodMoreThanOneAccident",
-    // Family History
-    "DoFamily","NumDeaths","NumContracted",
-    "AgeDied00","AgeContracted00","IsParent00","CVD00","ColonCancer00",
-    "AgeContracted10","IsParent10","CVD10","ColonCancer10",
-    // Substance Abuse
-    "DoSubAbuse",
-  ];
-  for (const k of fields) { if (body[k] !== undefined) params[k] = String(body[k]); }
-  return params;
-}
-
-async function proxyPublic(path) {
-  const url = `${COMPULIFE_BASE}${path}`;
-  console.log(`[Compulife] PUBLIC → ${url}`);
-  const r = await fetch(url);
-  const t = await r.text();
-  try { return JSON.parse(t); } catch { return { raw: t, status: r.status }; }
-}
-
-async function proxyPrivate(path, params) {
-  const payload = { COMPULIFEAUTHORIZATIONID: AUTH_ID, REMOTE_IP, ...params };
-  const url = `${COMPULIFE_BASE}${path}/?COMPULIFE=${encodeURIComponent(JSON.stringify(payload))}`;
-  console.log(`[Compulife] PRIVATE → ${COMPULIFE_BASE}${path}`);
-  console.log(`[Compulife] Full URL length: ${url.length}`);
-  console.log(`[Compulife] Payload keys: ${Object.keys(payload).join(', ')}`);
-  const r = await fetch(url);
-  console.log(`[Compulife] Response status: ${r.status}`);
-  const t = await r.text();
-  console.log(`[Compulife] Response preview: ${t.substring(0, 200)}`);
-  try { return JSON.parse(t); } catch { return { raw: t, status: r.status }; }
-}
-
-// ============================================================
-// ANTHROPIC — OCR for Lead Scanner Pro
+// ANTHROPIC — passthrough for OCR + AI Chat
 // ============================================================
 app.post("/anthropic", async (req, res) => {
   try {
     if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
-
-    // Support both legacy format and new passthrough format
     const isPassthrough = req.body.model && req.body.messages;
-
     let body;
     if (isPassthrough) {
-      // New format: pass through the full Anthropic request
       body = JSON.stringify(req.body);
     } else {
-      // Legacy format: image + prompt
       const { image, media_type, prompt } = req.body;
       if (!image) return res.status(400).json({ error: "image (base64) required" });
       body = JSON.stringify({
@@ -729,24 +741,15 @@ app.post("/anthropic", async (req, res) => {
         }],
       });
     }
-
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "Content-Type": "application/json",
-      },
+      headers: { "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "Content-Type": "application/json" },
       body,
     });
-
     const text = await r.text();
     let data;
-    try { data = JSON.parse(text); } catch(e) { data = { error: true, raw: text.substring(0, 200) }; }
-    if (!r.ok) {
-      console.error("[Anthropic] API error:", r.status, text.substring(0, 300));
-      return res.status(r.status).json(data);
-    }
+    try { data = JSON.parse(text); } catch (e) { data = { error: true, raw: text.substring(0, 200) }; }
+    if (!r.ok) return res.status(r.status).json(data);
     res.json(data);
   } catch (e) {
     console.error("[Anthropic]", e.message);
@@ -754,36 +757,19 @@ app.post("/anthropic", async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════
-// AI Chat Proxy — shields Anthropic API key from frontend; frontend POSTs to /ai/chat
-// ═══════════════════════════════════════════════════════════════
 app.post("/ai/chat", async (req, res) => {
   try {
-    if (!ANTHROPIC_API_KEY) {
-      return res.status(500).json({ error: "AI proxy error", detail: "ANTHROPIC_API_KEY not configured" });
-    }
-
+    if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: "AI proxy error", detail: "ANTHROPIC_API_KEY not configured" });
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
+      headers: { "Content-Type": "application/json", "x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" },
       body: JSON.stringify(req.body),
     });
-
     const raw = await response.text();
     let data;
-    try {
-      data = raw ? JSON.parse(raw) : {};
-    } catch (e) {
-      data = { error: "Invalid JSON from Anthropic", detail: raw.slice(0, 200) };
-    }
-
-    if (!response.ok) {
-      return res.status(response.status).json(data);
-    }
+    try { data = raw ? JSON.parse(raw) : {}; }
+    catch (e) { data = { error: "Invalid JSON from Anthropic", detail: raw.slice(0, 200) }; }
+    if (!response.ok) return res.status(response.status).json(data);
     res.json(data);
   } catch (err) {
     console.error("[AI Chat Proxy] Error:", err.message);
@@ -794,8 +780,6 @@ app.post("/ai/chat", async (req, res) => {
 // ============================================================
 // SMS — Telnyx
 // ============================================================
-
-// GET /sms/status — confirm SMS is configured
 app.get("/sms/status", (req, res) => {
   res.json({
     configured: !!TELNYX_API_KEY,
@@ -805,59 +789,32 @@ app.get("/sms/status", (req, res) => {
   });
 });
 
-// POST /sms/send — send single SMS
-// Body: { to, body, from (optional) }
 app.post("/sms/send", async (req, res) => {
   const { to, body, from } = req.body || {};
-  if (!to || !body) {
-    return res.status(400).json({ success: false, error: "Missing required fields: to, body" });
-  }
+  if (!to || !body) return res.status(400).json({ success: false, error: "Missing required fields: to, body" });
   const toClean = normalizePhone(to);
-  if (!toClean) {
-    return res.status(400).json({ success: false, error: "Invalid phone number format" });
-  }
-  if (!TELNYX_API_KEY) {
-    return res.status(500).json({ success: false, error: "TELNYX_API_KEY not configured" });
-  }
+  if (!toClean) return res.status(400).json({ success: false, error: "Invalid phone number format" });
+  if (!TELNYX_API_KEY) return res.status(500).json({ success: false, error: "TELNYX_API_KEY not configured" });
   try {
     const r = await fetch("https://api.telnyx.com/v2/messages", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${TELNYX_API_KEY}`,
-      },
-      body: JSON.stringify({
-        from: from || TELNYX_PHONE,
-        to: toClean,
-        text: body,
-      }),
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${TELNYX_API_KEY}` },
+      body: JSON.stringify({ from: from || TELNYX_PHONE, to: toClean, text: body }),
     });
     const data = await r.json();
     if (!r.ok) {
       const errMsg = data?.errors?.[0]?.detail || data?.error || "Telnyx send failed";
-      console.error(`[SMS] Error to ${toClean}:`, errMsg);
       return res.status(r.status).json({ success: false, error: errMsg });
     }
-    console.log(`[SMS] Sent to ${toClean} | ID: ${data?.data?.id || "unknown"}`);
-    res.json({
-      success: true,
-      sid: data?.data?.id,
-      to: toClean,
-      status: data?.data?.to?.[0]?.status || "queued",
-    });
+    res.json({ success: true, sid: data?.data?.id, to: toClean, status: data?.data?.to?.[0]?.status || "queued" });
   } catch (e) {
-    console.error("[SMS] Exception:", e.message);
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// POST /sms/send-bulk — send same message to multiple recipients
-// Body: { recipients: ['+16015551234', ...], body, from (optional) }
 app.post("/sms/send-bulk", async (req, res) => {
   const { recipients, body, from } = req.body || {};
-  if (!recipients || !Array.isArray(recipients) || !body) {
-    return res.status(400).json({ success: false, error: "Missing required fields: recipients (array), body" });
-  }
+  if (!recipients || !Array.isArray(recipients) || !body) return res.status(400).json({ success: false, error: "Missing required fields: recipients (array), body" });
   const results = [];
   for (const phone of recipients) {
     const toClean = normalizePhone(phone);
@@ -869,77 +826,49 @@ app.post("/sms/send-bulk", async (req, res) => {
         body: JSON.stringify({ from: from || TELNYX_PHONE, to: toClean, text: body }),
       });
       const data = await r.json();
-      if (r.ok) {
-        results.push({ to: toClean, success: true, sid: data?.data?.id });
-      } else {
-        results.push({ to: toClean, success: false, error: data?.errors?.[0]?.detail || "Send failed" });
-      }
-      await new Promise(resolve => setTimeout(resolve, 120)); // rate limit buffer
+      if (r.ok) results.push({ to: toClean, success: true, sid: data?.data?.id });
+      else results.push({ to: toClean, success: false, error: data?.errors?.[0]?.detail || "Send failed" });
+      await new Promise(resolve => setTimeout(resolve, 120));
     } catch (e) {
       results.push({ to: toClean, success: false, error: e.message });
     }
   }
   const sent = results.filter(r => r.success).length;
-  console.log(`[SMS] Bulk: ${sent}/${recipients.length} delivered`);
   res.json({ success: true, sent, total: recipients.length, results });
 });
 
 // ============================================================
 // EMAIL — Postmark
 // ============================================================
-
-// POST /email/send — send transactional email
-// Body: { to, subject, html, text, replyTo (optional) }
 app.post("/email/send", async (req, res) => {
   const { to, subject, html, text, replyTo } = req.body || {};
-  if (!to || !subject || (!html && !text)) {
-    return res.status(400).json({ success: false, error: "Missing required fields: to, subject, html or text" });
-  }
-  if (!POSTMARK_API_KEY) {
-    return res.status(500).json({ success: false, error: "POSTMARK_API_KEY not configured" });
-  }
+  if (!to || !subject || (!html && !text)) return res.status(400).json({ success: false, error: "Missing required fields: to, subject, html or text" });
+  if (!POSTMARK_API_KEY) return res.status(500).json({ success: false, error: "POSTMARK_API_KEY not configured" });
   try {
     const r = await fetch("https://api.postmarkapp.com/email", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Postmark-Server-Token": POSTMARK_API_KEY,
-        "Accept": "application/json",
-      },
+      headers: { "Content-Type": "application/json", "X-Postmark-Server-Token": POSTMARK_API_KEY, "Accept": "application/json" },
       body: JSON.stringify({
-        From: FROM_EMAIL,
-        To: to,
-        Subject: subject,
-        HtmlBody: html || "",
-        TextBody: text || "",
-        ReplyTo: replyTo || FROM_EMAIL,
-        MessageStream: "outbound",
+        From: FROM_EMAIL, To: to, Subject: subject,
+        HtmlBody: html || "", TextBody: text || "",
+        ReplyTo: replyTo || FROM_EMAIL, MessageStream: "outbound",
       }),
     });
     const data = await r.json();
-    if (!r.ok) {
-      console.error("[EMAIL] Error:", data?.Message || data);
-      return res.status(r.status).json({ success: false, error: data?.Message || "Postmark send failed" });
-    }
-    console.log(`[EMAIL] Sent to ${to} | ID: ${data.MessageID}`);
+    if (!r.ok) return res.status(r.status).json({ success: false, error: data?.Message || "Postmark send failed" });
     res.json({ success: true, messageId: data.MessageID, to, subject });
   } catch (e) {
-    console.error("[EMAIL] Exception:", e.message);
     res.status(500).json({ success: false, error: e.message });
   }
 });
 
 // ============================================================
-// SCAN LEAD — IQ Scanner Pro (multi-page, native fetch)
+// SCAN LEAD — IQ Scanner Pro (multi-page)
 // ============================================================
 app.post('/scan-lead', async (req, res) => {
   const { file, mediaType, files } = req.body;
-  if (!file && (!files || !files.length)) {
-    return res.status(400).json({ error: 'No file provided' });
-  }
-  if (!ANTHROPIC_API_KEY) {
-    return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
-  }
+  if (!file && (!files || !files.length)) return res.status(400).json({ error: 'No file provided' });
+  if (!ANTHROPIC_API_KEY) return res.status(500).json({ error: 'ANTHROPIC_API_KEY not configured' });
   try {
     const imageBlocks = [];
     if (files && files.length) {
@@ -961,46 +890,32 @@ app.post('/scan-lead', async (req, res) => {
     });
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 8000,
-        messages: [{ role: 'user', content: imageBlocks }]
-      })
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 8000, messages: [{ role: 'user', content: imageBlocks }] })
     });
     if (!response.ok) {
       const errText = await response.text();
-      console.error('[scan-lead] Anthropic error:', response.status, errText.substring(0, 200));
       return res.status(502).json({ error: 'Anthropic API error: ' + response.status });
     }
     const data = await response.json();
     const raw = (data.content && data.content[0] && data.content[0].text || '').trim();
     let result;
-    try {
-      result = JSON.parse(raw);
-    } catch(e) {
-      // Try to extract a valid JSON array even if truncated
+    try { result = JSON.parse(raw); }
+    catch (e) {
       const arrMatch = raw.match(/\[[\s\S]*/);
       if (arrMatch) {
         let partial = arrMatch[0];
-        // Close any truncated array by finding last complete object
         const lastClose = partial.lastIndexOf('}');
         if (lastClose > 0) partial = partial.substring(0, lastClose + 1) + ']';
-        try { result = JSON.parse(partial); } catch(e2) { result = []; }
+        try { result = JSON.parse(partial); } catch (e2) { result = []; }
       } else {
         const objMatch = raw.match(/\{[\s\S]*\}/);
         result = objMatch ? JSON.parse(objMatch[0]) : [];
       }
     }
     const leads = Array.isArray(result) ? result : [result];
-    console.log('[scan-lead] Success:', leads.length, 'leads extracted');
     res.json({ leads, lead: leads[0] || {} });
-  } catch(e) {
-    console.error('[scan-lead] Exception:', e.message);
+  } catch (e) {
     res.status(500).json({ error: e.message || 'Scan failed' });
   }
 });
@@ -1011,6 +926,7 @@ app.post('/scan-lead', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`\n✅ iAgentIQ API Hub v7.1 running on port ${PORT}`);
   console.log(`   Compulife:  ${AUTH_ID ? "✓ configured" : "✗ NOT SET"}`);
+  console.log(`   Server IP:  ${SERVER_IP_FALLBACK}`);
   console.log(`   Anthropic:  ${ANTHROPIC_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   SMS/Telnyx: ${TELNYX_API_KEY ? "✓ configured (" + TELNYX_PHONE + ")" : "✗ NOT SET"}`);
   console.log(`   Email/PM:   ${POSTMARK_API_KEY ? "✓ configured (" + FROM_EMAIL + ")" : "✗ NOT SET"}`);
