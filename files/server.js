@@ -1,12 +1,13 @@
 // ============================================================
 // iAgentIQ API HUB — Railway Proxy Server v7.1
-// Routes: Compulife | SMS (Telnyx) | Email (Postmark) | Anthropic | Google Drive
+// Routes: Compulife | GHL (SMS+Email+CRM) | Anthropic | Google Drive | Vision
 // Deploy: Railway with Static Egress IP (162.220.232.99)
 // Updated: May 13, 2026 — Compulife proxy rewritten to match official API spec:
 //   - POST multipart/form-data (was: GET with JSON in query string)
 //   - REMOTE_IP passed per-request from caller (was: hardcoded server IP)
 //   - Auth + REMOTE_IP in URL query params, all other fields in formdata body
 //   - Diagnostic endpoint /compulife/diag for sanity checks
+//   - Telnyx + Postmark removed; SMS and Email both go via GHL now
 // ============================================================
 
 const express = require("express");
@@ -38,13 +39,9 @@ const SERVER_IP_FALLBACK = process.env.REMOTE_IP || "162.220.232.99";
 const COMPULIFE_BASE = "https://www.compulifeapi.com/api";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
 
-// ---- Telnyx SMS ----
-const TELNYX_API_KEY = process.env.TELNYX_API_KEY || "";
-const TELNYX_PHONE = process.env.TELNYX_PHONE || "+16016918436";
-
-// ---- Postmark Email ----
-const POSTMARK_API_KEY = process.env.POSTMARK_API_KEY || "";
-const FROM_EMAIL = process.env.FROM_EMAIL || "swatkins@quoteit.insure";
+// ---- SMS & Email ----
+// As of May 2026: SMS and email both go through GHL (/ghl/conversations/messages).
+// Telnyx + Postmark integrations were retired — DO NOT re-add them.
 
 // Google Drive Config
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
@@ -94,8 +91,7 @@ app.get("/", (req, res) => {
       anthropic: !!ANTHROPIC_API_KEY,
       googleDrive: !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
       googleVision: !!GCP_VISION_API_KEY,
-      sms: !!TELNYX_API_KEY,
-      email: !!POSTMARK_API_KEY,
+      ghl: !!GHL_API_KEY,
     },
     endpoints: [
       "POST   /compulife/quote",
@@ -103,10 +99,9 @@ app.get("/", (req, res) => {
       "GET    /compulife/diag",
       "GET    /compulife/categories",
       "GET    /compulife/companies",
-      "POST   /sms/send",
-      "POST   /sms/send-bulk",
-      "GET    /sms/status",
-      "POST   /email/send",
+      "GET    /compulife/states",
+      "GET    /compulife/products",
+      "POST   /ghl/conversations/messages   (SMS + email both go here)",
       "POST   /drive/upload",
       "POST   /vision/ocr",
       "POST   /anthropic",
@@ -778,91 +773,6 @@ app.post("/ai/chat", async (req, res) => {
 });
 
 // ============================================================
-// SMS — Telnyx
-// ============================================================
-app.get("/sms/status", (req, res) => {
-  res.json({
-    configured: !!TELNYX_API_KEY,
-    from: TELNYX_PHONE,
-    service: "telnyx",
-    status: TELNYX_API_KEY ? "ready" : "missing TELNYX_API_KEY",
-  });
-});
-
-app.post("/sms/send", async (req, res) => {
-  const { to, body, from } = req.body || {};
-  if (!to || !body) return res.status(400).json({ success: false, error: "Missing required fields: to, body" });
-  const toClean = normalizePhone(to);
-  if (!toClean) return res.status(400).json({ success: false, error: "Invalid phone number format" });
-  if (!TELNYX_API_KEY) return res.status(500).json({ success: false, error: "TELNYX_API_KEY not configured" });
-  try {
-    const r = await fetch("https://api.telnyx.com/v2/messages", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${TELNYX_API_KEY}` },
-      body: JSON.stringify({ from: from || TELNYX_PHONE, to: toClean, text: body }),
-    });
-    const data = await r.json();
-    if (!r.ok) {
-      const errMsg = data?.errors?.[0]?.detail || data?.error || "Telnyx send failed";
-      return res.status(r.status).json({ success: false, error: errMsg });
-    }
-    res.json({ success: true, sid: data?.data?.id, to: toClean, status: data?.data?.to?.[0]?.status || "queued" });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-app.post("/sms/send-bulk", async (req, res) => {
-  const { recipients, body, from } = req.body || {};
-  if (!recipients || !Array.isArray(recipients) || !body) return res.status(400).json({ success: false, error: "Missing required fields: recipients (array), body" });
-  const results = [];
-  for (const phone of recipients) {
-    const toClean = normalizePhone(phone);
-    if (!toClean) { results.push({ to: phone, success: false, error: "Invalid phone" }); continue; }
-    try {
-      const r = await fetch("https://api.telnyx.com/v2/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${TELNYX_API_KEY}` },
-        body: JSON.stringify({ from: from || TELNYX_PHONE, to: toClean, text: body }),
-      });
-      const data = await r.json();
-      if (r.ok) results.push({ to: toClean, success: true, sid: data?.data?.id });
-      else results.push({ to: toClean, success: false, error: data?.errors?.[0]?.detail || "Send failed" });
-      await new Promise(resolve => setTimeout(resolve, 120));
-    } catch (e) {
-      results.push({ to: toClean, success: false, error: e.message });
-    }
-  }
-  const sent = results.filter(r => r.success).length;
-  res.json({ success: true, sent, total: recipients.length, results });
-});
-
-// ============================================================
-// EMAIL — Postmark
-// ============================================================
-app.post("/email/send", async (req, res) => {
-  const { to, subject, html, text, replyTo } = req.body || {};
-  if (!to || !subject || (!html && !text)) return res.status(400).json({ success: false, error: "Missing required fields: to, subject, html or text" });
-  if (!POSTMARK_API_KEY) return res.status(500).json({ success: false, error: "POSTMARK_API_KEY not configured" });
-  try {
-    const r = await fetch("https://api.postmarkapp.com/email", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Postmark-Server-Token": POSTMARK_API_KEY, "Accept": "application/json" },
-      body: JSON.stringify({
-        From: FROM_EMAIL, To: to, Subject: subject,
-        HtmlBody: html || "", TextBody: text || "",
-        ReplyTo: replyTo || FROM_EMAIL, MessageStream: "outbound",
-      }),
-    });
-    const data = await r.json();
-    if (!r.ok) return res.status(r.status).json({ success: false, error: data?.Message || "Postmark send failed" });
-    res.json({ success: true, messageId: data.MessageID, to, subject });
-  } catch (e) {
-    res.status(500).json({ success: false, error: e.message });
-  }
-});
-
-// ============================================================
 // SCAN LEAD — IQ Scanner Pro (multi-page)
 // ============================================================
 app.post('/scan-lead', async (req, res) => {
@@ -928,8 +838,7 @@ app.listen(PORT, () => {
   console.log(`   Compulife:  ${AUTH_ID ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Server IP:  ${SERVER_IP_FALLBACK}`);
   console.log(`   Anthropic:  ${ANTHROPIC_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
-  console.log(`   SMS/Telnyx: ${TELNYX_API_KEY ? "✓ configured (" + TELNYX_PHONE + ")" : "✗ NOT SET"}`);
-  console.log(`   Email/PM:   ${POSTMARK_API_KEY ? "✓ configured (" + FROM_EMAIL + ")" : "✗ NOT SET"}`);
+  console.log(`   GHL:        ${GHL_API_KEY ? "✓ configured (SMS + Email both via /ghl/conversations/messages)" : "✗ NOT SET"}`);
   console.log(`   Drive:      ${GOOGLE_REFRESH_TOKEN ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   Vision:     ${GCP_VISION_API_KEY ? "✓ configured" : "✗ NOT SET"}`);
   console.log(`   CORS:       ${ALLOWED_ORIGINS.join(", ")}\n`);
