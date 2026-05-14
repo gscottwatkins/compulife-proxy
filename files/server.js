@@ -216,6 +216,35 @@ app.post("/lead-card/upload", async (req, res) => {
   }
 });
 
+app.get("/lead-card/diag", (req, res) => {
+  function decodeJwtPayload(token) {
+    try {
+      const parts = String(token || "").split(".");
+      if (parts.length < 2) return null;
+      const normalized = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+      return JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
+    } catch {
+      return null;
+    }
+  }
+  const claims = decodeJwtPayload(SUPABASE_SERVICE_KEY);
+  let host = "";
+  try { host = new URL(SUPABASE_URL).host; } catch {}
+  res.json({
+    ok: true,
+    supabaseUrlConfigured: !!SUPABASE_URL,
+    supabaseHost: host,
+    bucket: LEAD_CARDS_BUCKET,
+    serviceKeyPresent: !!SUPABASE_SERVICE_KEY,
+    serviceKeyLooksLikeJwt: String(SUPABASE_SERVICE_KEY || "").split(".").length >= 3,
+    jwtRole: claims?.role || null,
+    jwtIssuer: claims?.iss || null,
+    jwtRef: claims?.ref || null,
+    jwtExp: claims?.exp ? new Date(claims.exp * 1000).toISOString() : null,
+  });
+});
+
 // ============================================================
 // COMPULIFE — CORRECTED IMPLEMENTATION (v7.1)
 // ============================================================
