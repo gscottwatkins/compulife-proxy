@@ -853,6 +853,22 @@ app.post("/ghl/opportunities", async (req, res) => {
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
+app.get("/ghl/opportunities/search", async (req, res) => {
+  try {
+    const params = new URLSearchParams();
+    params.set("location_id", GHL_LOCATION_ID);
+    if (req.query.contact_id || req.query.contactId) params.set("contact_id", req.query.contact_id || req.query.contactId);
+    if (req.query.pipeline_id || req.query.pipelineId) params.set("pipeline_id", req.query.pipeline_id || req.query.pipelineId);
+    if (req.query.pipeline_stage_id || req.query.pipelineStageId) params.set("pipeline_stage_id", req.query.pipeline_stage_id || req.query.pipelineStageId);
+    if (req.query.status) params.set("status", req.query.status);
+    if (req.query.query) params.set("query", req.query.query);
+    if (req.query.limit) params.set("limit", req.query.limit);
+    const result = await ghlFetch("GET", `/opportunities/search?${params.toString()}`);
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
 app.put("/ghl/opportunities/:id", async (req, res) => {
   try { res.json(await ghlFetch("PUT", `/opportunities/${req.params.id}`, req.body)); }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
