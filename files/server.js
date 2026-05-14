@@ -846,7 +846,10 @@ app.get("/ghl/pipelines", async (req, res) => {
 });
 
 app.post("/ghl/opportunities", async (req, res) => {
-  try { res.json(await ghlFetch("POST", "/opportunities/", { ...req.body, locationId: GHL_LOCATION_ID })); }
+  try {
+    const result = await ghlFetch("POST", "/opportunities/", { ...req.body, locationId: GHL_LOCATION_ID });
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
