@@ -34,6 +34,9 @@ const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || "";
 const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN || "";
 const GOOGLE_DRIVE_FOLDER_ID = process.env.GOOGLE_DRIVE_FOLDER_ID || "";
 const GCP_VISION_API_KEY = process.env.GCP_VISION_API_KEY || "";
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const LEAD_CARDS_BUCKET = process.env.SUPABASE_LEAD_CARDS_BUCKET || "lead-cards";
 
 // ---- CORS (full origin list) ----
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
@@ -77,7 +80,7 @@ app.options("*", cors({
   },
 }));
 
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "35mb" }));
 
 // ============================================================
 // HEALTH CHECK
@@ -93,6 +96,7 @@ app.get("/", (req, res) => {
       anthropic: !!ANTHROPIC_API_KEY,
       googleDrive: !!(GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_REFRESH_TOKEN),
       googleVision: !!GCP_VISION_API_KEY,
+      supabaseStorage: !!(SUPABASE_URL && SUPABASE_SERVICE_KEY),
       ghl: !!GHL_API_KEY,
     },
     endpoints: [
@@ -109,8 +113,107 @@ app.get("/", (req, res) => {
       "POST   /anthropic",
       "POST   /ai/chat",
       "POST   /scan-lead",
+      "POST   /lead-card/upload",
     ],
   });
+});
+
+// ============================================================
+// LEAD CARD STORAGE — Supabase public bucket
+// ============================================================
+function safeStorageSegment(value, fallback = "lead") {
+  return String(value || fallback)
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || fallback;
+}
+
+function extFromMime(mimeType, fileName = "") {
+  const nameExt = String(fileName).toLowerCase().match(/\.([a-z0-9]{2,5})$/)?.[1];
+  if (nameExt) return nameExt === "jpeg" ? "jpg" : nameExt;
+  if (mimeType === "application/pdf") return "pdf";
+  if (mimeType === "image/png") return "png";
+  if (mimeType === "image/webp") return "webp";
+  if (mimeType === "image/heic") return "heic";
+  return "jpg";
+}
+
+app.post("/lead-card/upload", async (req, res) => {
+  try {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+      return res.status(500).json({
+        ok: false,
+        error: "Supabase storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_KEY in Railway.",
+      });
+    }
+
+    const {
+      fileName = "lead-card",
+      mimeType = "application/octet-stream",
+      base64 = "",
+      firstName = "",
+      lastName = "",
+      phone = "",
+      pageNum = "",
+      totalPages = "",
+      folder = "",
+    } = req.body || {};
+
+    if (!base64 || typeof base64 !== "string") {
+      return res.status(400).json({ ok: false, error: "Missing base64 file content" });
+    }
+
+    const cleanBase64 = base64.includes(",") ? base64.split(",").pop() : base64;
+    const buffer = Buffer.from(cleanBase64, "base64");
+    if (!buffer.length) return res.status(400).json({ ok: false, error: "Empty decoded file" });
+
+    const ext = extFromMime(mimeType, fileName);
+    const today = new Date().toISOString().slice(0, 10);
+    const namePart = safeStorageSegment(`${firstName}-${lastName}`.replace(/^-|-$/g, ""), "lead");
+    const phonePart = safeStorageSegment(String(phone).replace(/\D/g, ""), "no-phone");
+    const pagePart = pageNum ? `-p${safeStorageSegment(pageNum)}` : "";
+    const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const folderPart = safeStorageSegment(folder || today, today);
+    const objectPath = `${folderPart}/${namePart}-${phonePart}${pagePart}-${nonce}.${ext}`;
+
+    const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(LEAD_CARDS_BUCKET)}/${objectPath}`;
+    const uploadResp = await fetch(uploadUrl, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
+        "apikey": SUPABASE_SERVICE_KEY,
+        "Content-Type": mimeType || "application/octet-stream",
+        "x-upsert": "false",
+      },
+      body: buffer,
+    });
+
+    const uploadText = await uploadResp.text();
+    if (!uploadResp.ok) {
+      return res.status(uploadResp.status).json({
+        ok: false,
+        error: "Supabase upload failed",
+        status: uploadResp.status,
+        detail: uploadText.slice(0, 500),
+      });
+    }
+
+    const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${encodeURIComponent(LEAD_CARDS_BUCKET)}/${objectPath}`;
+    return res.json({
+      ok: true,
+      bucket: LEAD_CARDS_BUCKET,
+      path: objectPath,
+      url: publicUrl,
+      mimeType,
+      size: buffer.length,
+      pageNum,
+      totalPages,
+    });
+  } catch (e) {
+    console.error("[LeadCard] upload error:", e);
+    return res.status(500).json({ ok: false, error: e.message || "Lead card upload failed" });
+  }
 });
 
 // ============================================================
