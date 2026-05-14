@@ -114,6 +114,9 @@ app.get("/", (req, res) => {
       "POST   /ai/chat",
       "POST   /scan-lead",
       "POST   /lead-card/upload",
+      "POST   /scoreboard/event",
+      "POST   /production/entry",
+      "GET    /scoreboard/live",
     ],
   });
 });
@@ -243,6 +246,178 @@ app.get("/lead-card/diag", (req, res) => {
     jwtRef: claims?.ref || null,
     jwtExp: claims?.exp ? new Date(claims.exp * 1000).toISOString() : null,
   });
+});
+
+// ============================================================
+// LIVE SCOREBOARD + PRODUCTION — Supabase REST
+// ============================================================
+function scoreboardPoints(type, amount = 0) {
+  const base = {
+    lead_scanned: 1,
+    contact_created: 2,
+    opportunity_created: 3,
+    appointment_loaded: 3,
+    quote_delivered: 5,
+    disposition_thinking_about_it: 3,
+    disposition_rescheduled: 3,
+    disposition_no_show: 1,
+    disposition_voicemail: 1,
+    disposition_no_answer: 1,
+    disposition_not_interested: 0,
+    sale_submitted: 25,
+    policy_issued: 30,
+  }[type] ?? 0;
+  const premiumBonus = type === "sale_submitted" ? Math.floor((Number(amount) || 0) / 1000) * 10 : 0;
+  return base + premiumBonus;
+}
+
+async function supabaseRest(method, table, { body, query = "" } = {}) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+    throw new Error("Supabase not configured");
+  }
+  const url = `${SUPABASE_URL}/rest/v1/${table}${query ? `?${query}` : ""}`;
+  const headers = {
+    "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
+    "apikey": SUPABASE_SERVICE_KEY,
+    "Content-Type": "application/json",
+    "Prefer": "return=representation",
+  };
+  const r = await fetch(url, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await r.text();
+  let data;
+  try { data = text ? JSON.parse(text) : null; }
+  catch { data = { raw: text.slice(0, 1000) }; }
+  if (!r.ok) {
+    const err = new Error(data?.message || data?.hint || text.slice(0, 200) || `Supabase ${r.status}`);
+    err.status = r.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+app.post("/scoreboard/event", async (req, res) => {
+  try {
+    const b = req.body || {};
+    const event_type = String(b.event_type || b.type || "").trim();
+    if (!event_type) return res.status(400).json({ ok: false, error: "event_type required" });
+    const annualPremium = Number(b.annual_premium || b.premiumAnnual || b.amount || 0);
+    const row = {
+      event_type,
+      agent_id: b.agent_id || b.agent || "",
+      agent_name: b.agent_name || "",
+      contact_id: b.contact_id || b.contactId || "",
+      opportunity_id: b.opportunity_id || b.opportunityId || "",
+      client_name: b.client_name || b.clientName || "",
+      points: Number.isFinite(Number(b.points)) ? Number(b.points) : scoreboardPoints(event_type, annualPremium),
+      metadata: b.metadata || {},
+    };
+    const inserted = await supabaseRest("POST", "scoreboard_events", { body: row });
+    res.json({ ok: true, event: Array.isArray(inserted) ? inserted[0] : inserted });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message, detail: e.data || null });
+  }
+});
+
+app.post("/production/entry", async (req, res) => {
+  try {
+    const b = req.body || {};
+    const annualPremium = Number(b.annual_premium || b.premiumAnnual || 0);
+    const commission = Number(b.commission_amount || b.commissionEst || 0);
+    const row = {
+      ghl_contact_id: b.ghl_contact_id || b.contact_id || b.contactId || "",
+      ghl_opportunity_id: b.ghl_opportunity_id || b.opportunity_id || b.opportunityId || "",
+      agent_id: b.agent_id || b.agent || "",
+      agent_name: b.agent_name || "",
+      client_name: b.client_name || b.client || "",
+      carrier: b.carrier || "",
+      product: b.product || "",
+      coverage_amount: Number(b.coverage_amount || b.coverage || 0),
+      annual_premium: annualPremium,
+      monthly_premium: Number(b.monthly_premium || b.premiumMonthly || 0),
+      commission_amount: commission,
+      policy_status: b.policy_status || b.status || "pending",
+      policy_number: b.policy_number || b.policyNum || "",
+      sold_date: b.sold_date || b.date || new Date().toISOString().slice(0, 10),
+      source: b.source || "engine",
+      metadata: b.metadata || {},
+    };
+    const inserted = await supabaseRest("POST", "production_entries", { body: row });
+    await supabaseRest("POST", "scoreboard_events", {
+      body: {
+        event_type: "sale_submitted",
+        agent_id: row.agent_id,
+        agent_name: row.agent_name,
+        contact_id: row.ghl_contact_id,
+        opportunity_id: row.ghl_opportunity_id,
+        client_name: row.client_name,
+        points: scoreboardPoints("sale_submitted", annualPremium),
+        metadata: { annual_premium: annualPremium, carrier: row.carrier, product: row.product },
+      },
+    }).catch(() => {});
+    res.json({ ok: true, entry: Array.isArray(inserted) ? inserted[0] : inserted });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message, detail: e.data || null });
+  }
+});
+
+function startForPeriod(period) {
+  const now = new Date();
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  if (period === "week") start.setDate(start.getDate() - start.getDay());
+  if (period === "month") start.setDate(1);
+  if (period === "year") { start.setMonth(0, 1); }
+  return start.toISOString();
+}
+
+app.get("/scoreboard/live", async (req, res) => {
+  try {
+    const period = ["day", "week", "month", "year"].includes(req.query.period) ? req.query.period : "day";
+    const since = req.query.since || startForPeriod(period);
+    const eventQuery = new URLSearchParams({
+      select: "*",
+      created_at: `gte.${since}`,
+      order: "created_at.desc",
+      limit: String(req.query.limit || 500),
+    }).toString();
+    const prodQuery = new URLSearchParams({
+      select: "*",
+      created_at: `gte.${since}`,
+      order: "created_at.desc",
+      limit: String(req.query.limit || 500),
+    }).toString();
+    const [events, production] = await Promise.all([
+      supabaseRest("GET", "scoreboard_events", { query: eventQuery }),
+      supabaseRest("GET", "production_entries", { query: prodQuery }),
+    ]);
+    const agents = {};
+    for (const ev of events || []) {
+      const id = ev.agent_id || "unknown";
+      agents[id] ||= { agent_id: id, agent_name: ev.agent_name || id, points: 0, events: 0, sales: 0, annual_premium: 0, commission: 0 };
+      agents[id].points += Number(ev.points || 0);
+      agents[id].events += 1;
+    }
+    for (const p of production || []) {
+      const id = p.agent_id || "unknown";
+      agents[id] ||= { agent_id: id, agent_name: p.agent_name || id, points: 0, events: 0, sales: 0, annual_premium: 0, commission: 0 };
+      agents[id].sales += 1;
+      agents[id].annual_premium += Number(p.annual_premium || 0);
+      agents[id].commission += Number(p.commission_amount || 0);
+    }
+    const leaderboard = Object.values(agents).sort((a, b) => (b.points - a.points) || (b.annual_premium - a.annual_premium) || (b.sales - a.sales));
+    const awards = [];
+    if (leaderboard[0]) awards.push({ type: "top_points", label: "Points leader", agent_name: leaderboard[0].agent_name, value: leaderboard[0].points });
+    const topPremium = [...leaderboard].sort((a,b)=>b.annual_premium-a.annual_premium)[0];
+    if (topPremium && topPremium.annual_premium > 0) awards.push({ type: "top_premium", label: "Premium leader", agent_name: topPremium.agent_name, value: topPremium.annual_premium });
+    res.json({ ok: true, period, since, leaderboard, events, production, awards });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message, detail: e.data || null });
+  }
 });
 
 // ============================================================
