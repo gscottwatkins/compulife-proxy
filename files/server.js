@@ -686,15 +686,25 @@ async function ghlFetch(method, path, body) {
   if (body && method !== "GET") opts.body = JSON.stringify(body);
   const r = await fetch(url, opts);
   const text = await r.text();
-  try { return JSON.parse(text); }
-  catch (e) { return { error: true, status: r.status, raw: text.substring(0, 200) }; }
+  let data;
+  try { data = JSON.parse(text); }
+  catch (e) { data = { error: true, raw: text.substring(0, 1000) }; }
+  return {
+    _ok: r.ok,
+    _status: r.status,
+    _path: path,
+    ...data,
+  };
 }
 
 // ============================================================
 // GHL — CONTACTS
 // ============================================================
 app.post("/ghl/contacts", async (req, res) => {
-  try { res.json(await ghlFetch("POST", "/contacts/", { ...req.body, locationId: GHL_LOCATION_ID })); }
+  try {
+    const result = await ghlFetch("POST", "/contacts/", { ...req.body, locationId: GHL_LOCATION_ID });
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
