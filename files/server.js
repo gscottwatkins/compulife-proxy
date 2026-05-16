@@ -949,7 +949,13 @@ app.post("/ghl/conversations/messages", async (req, res) => {
 // ============================================================
 app.get("/ghl/email-templates", async (req, res) => {
   try {
-    const result = await ghlFetch("GET", `/emails/builder?locationId=${GHL_LOCATION_ID}`);
+    const params = new URLSearchParams();
+    params.set("locationId", GHL_LOCATION_ID);
+    if (req.query.limit) params.set("limit", req.query.limit);
+    if (req.query.skip) params.set("skip", req.query.skip);
+    if (req.query.offset) params.set("offset", req.query.offset);
+    if (req.query.search) params.set("search", req.query.search);
+    const result = await ghlFetch("GET", `/emails/builder?${params.toString()}`);
     res.status(result._ok ? 200 : result._status || 502).json(result);
   } catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
