@@ -945,6 +945,82 @@ app.post("/ghl/conversations/messages", async (req, res) => {
 });
 
 // ============================================================
+// GHL — EMAIL TEMPLATES
+// ============================================================
+app.get("/ghl/email-templates", async (req, res) => {
+  try {
+    const result = await ghlFetch("GET", `/emails/builder?locationId=${GHL_LOCATION_ID}`);
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+app.post("/ghl/email-templates", async (req, res) => {
+  try {
+    const name = req.body.name || req.body.title || "iAgentIQ Email Template";
+    const subject = req.body.subject || "";
+    const previewText = req.body.previewText || "";
+    const html = req.body.html || req.body.editorContent || "";
+    if (!html) return res.status(400).json({ error: true, message: "html/editorContent is required" });
+
+    // GHL's email builder API has evolved. Try the current simplified editor
+    // payload first, then fall back to the older HTML fields if the location
+    // still expects the legacy shape.
+    const attempts = [
+      {
+        locationId: GHL_LOCATION_ID,
+        name,
+        title: name,
+        editorType: "html",
+        editorContent: html,
+        subject,
+        previewText,
+      },
+      {
+        locationId: GHL_LOCATION_ID,
+        name,
+        title: name,
+        type: "html",
+        html,
+        subject,
+        previewText,
+        isPlainText: false,
+      },
+      {
+        locationId: GHL_LOCATION_ID,
+        templateName: name,
+        name,
+        subject,
+        html,
+        type: "html",
+        isPlainText: false,
+      },
+    ];
+
+    const results = [];
+    for (const payload of attempts) {
+      const result = await ghlFetch("POST", "/emails/builder", payload);
+      results.push(result);
+      if (result._ok) return res.status(200).json({ success: true, attempt: results.length, result });
+    }
+
+    res.status(results[0]?._status || 502).json({ error: true, message: "All GHL email-template create attempts failed", results });
+  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+app.patch("/ghl/email-templates/:templateId", async (req, res) => {
+  try {
+    const payload = { ...req.body };
+    if (payload.html && !payload.editorContent) {
+      payload.editorType = payload.editorType || "html";
+      payload.editorContent = payload.html;
+      delete payload.html;
+    }
+    const result = await ghlFetch("PATCH", `/emails/builder/${req.params.templateId}`, payload);
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+// ============================================================
 // GHL — CALENDAR / APPOINTMENTS
 // ============================================================
 app.get("/ghl/calendars", async (req, res) => {
