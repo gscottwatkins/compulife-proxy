@@ -1013,6 +1013,13 @@ app.post("/ghl/email-templates", async (req, res) => {
   } catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
+app.get("/ghl/email-templates/:templateId", async (req, res) => {
+  try {
+    const result = await ghlFetch("GET", `/emails/builder/${req.params.templateId}?locationId=${GHL_LOCATION_ID}`);
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  } catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
 app.patch("/ghl/email-templates/:templateId", async (req, res) => {
   try {
     const payload = { ...req.body };
