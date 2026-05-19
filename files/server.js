@@ -39,18 +39,25 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUP
 const LEAD_CARDS_BUCKET = process.env.SUPABASE_LEAD_CARDS_BUCKET || "lead-cards";
 
 // ---- CORS (full origin list) ----
-const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(",").map(s => s.trim())
-  : [
-      "https://engine.iagentiq.com",
-      "https://www.iagentiq.com",
-      "https://app.iagentiq.com",
-      "https://iagentiq-quote-engine.gscottwatkins.workers.dev",
-      "https://quoteit.insure",
-      "https://www.quoteit.insure",
-      "https://quoteitengine.com",
-      "https://www.quoteitengine.com",
-    ];
+// Required production origins are always allowed. ALLOWED_ORIGINS may add
+// extra origins in Railway, but it must never replace the engine/CRM defaults.
+const REQUIRED_ALLOWED_ORIGINS = [
+  "https://engine.iagentiq.com",
+  "https://www.iagentiq.com",
+  "https://app.iagentiq.com",
+  "https://iagentiq-quote-engine.gscottwatkins.workers.dev",
+  "https://quoteit.insure",
+  "https://www.quoteit.insure",
+  "https://quoteitengine.com",
+  "https://www.quoteitengine.com",
+];
+const ENV_ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",").map(s => s.trim()).filter(Boolean)
+  : [];
+const ALLOWED_ORIGINS = Array.from(new Set([
+  ...REQUIRED_ALLOWED_ORIGINS,
+  ...ENV_ALLOWED_ORIGINS,
+]));
 
 app.use(cors({
   origin: function (origin, callback) {
