@@ -438,10 +438,10 @@ app.get("/scoreboard/live", async (req, res) => {
 //   Body: each quote field (State, BirthMonth, Sex, Health, NewCategory, etc.)
 //         as its own multipart form field, values quoted as strings.
 //
-// REMOTE_IP must be the END USER'S browser IP, not the server's, to keep
-// per-user rate limiting working. The engine captures the user's IP browser-side
-// and passes it in req.body.REMOTE_IP. Fall back to the server's IP only if
-// the caller didn't provide one (which should not happen in normal use).
+// REMOTE_IP must be the IP whitelisted with Compulife. In production that is
+// Railway's static egress IP, not the user's browser IP. Passing x-forwarded-for
+// can make Compulife return "scraping" or empty result sets even though the
+// request shape is otherwise valid.
 // ============================================================
 
 // Helper — build a multipart/form-data body from a plain object.
@@ -559,7 +559,7 @@ async function callCompulifePublic(endpoint) {
 // The engine calls this with all quote fields in the body, plus REMOTE_IP.
 app.post("/compulife/quote", async (req, res) => {
   try {
-    const userIp = req.body.REMOTE_IP || req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || null;
+    const userIp = SERVER_IP_FALLBACK;
     const fields = normalizeQuoteFields(req.body);
 
     // Basic validation — fail fast with a useful message instead of letting
@@ -586,7 +586,7 @@ app.post("/compulife/quote", async (req, res) => {
 // Compulife's pre-formatted spreadsheet-style endpoint. Same field shape.
 app.post("/compulife/sidebyside", async (req, res) => {
   try {
-    const userIp = req.body.REMOTE_IP || req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || null;
+    const userIp = SERVER_IP_FALLBACK;
     const fields = normalizeQuoteFields(req.body);
     const result = await callCompulifeQuote(userIp, fields, "/sidebyside");
     return res.json(result);
@@ -656,7 +656,7 @@ app.get("/compulife/diag", async (req, res) => {
 app.post("/", async (req, res) => {
   try {
     const action = (req.body || {}).action || "ping";
-    const userIp = req.body.REMOTE_IP || req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || null;
+    const userIp = SERVER_IP_FALLBACK;
     switch (action) {
       case "ping":
         return res.json({ status: "ok", service: "compulife-proxy", timestamp: new Date().toISOString() });
