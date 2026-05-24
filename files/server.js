@@ -928,6 +928,24 @@ app.post("/ghl/contacts/:id/tasks", async (req, res) => {
 });
 
 // ============================================================
+// GHL — CUSTOM FIELDS
+// ============================================================
+app.get("/ghl/custom-fields", async (req, res) => {
+  try { res.json(await ghlFetch("GET", `/locations/${GHL_LOCATION_ID}/customFields`)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+app.post("/ghl/custom-fields", async (req, res) => {
+  try { res.json(await ghlFetch("POST", `/locations/${GHL_LOCATION_ID}/customFields`, { ...req.body, model: req.body.model || "contact" })); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+app.get("/ghl/custom-fields/:id", async (req, res) => {
+  try { res.json(await ghlFetch("GET", `/locations/${GHL_LOCATION_ID}/customFields/${req.params.id}`)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+// ============================================================
 // GHL — CONVERSATIONS / MESSAGING
 // ============================================================
 app.get("/ghl/conversations/:contactId", async (req, res) => {
@@ -1113,6 +1131,11 @@ app.get("/ghl/users", async (req, res) => {
 
 app.get("/ghl/pipelines", async (req, res) => {
   try { res.json(await ghlFetch("GET", `/opportunities/pipelines?locationId=${GHL_LOCATION_ID}`)); }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+app.get("/ghl/workflows", async (req, res) => {
+  try { res.json(await ghlFetch("GET", `/workflows/?locationId=${GHL_LOCATION_ID}`)); }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
