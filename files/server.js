@@ -96,7 +96,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "iagentiq-api-hub",
-    version: "7.1.4",
+    version: "7.1.5",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
@@ -109,6 +109,7 @@ app.get("/", (req, res) => {
     endpoints: [
       "POST   /compulife/quote",
       "POST   /compulife/sidebyside",
+      "POST   /api/compulife/quotes",
       "GET    /compulife/diag",
       "GET    /compulife/categories",
       "GET    /compulife/companies",
@@ -522,6 +523,92 @@ function resolveCompulifeRemoteIp(req) {
   return String(candidate).replace(/^::ffff:/, "");
 }
 
+const COMPULIFE_QUOTE_CACHE_TTL_MS = 10 * 60 * 1000;
+const compulifeQuoteCache = new Map();
+const compulifeInFlight = new Map();
+
+function stableJson(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return JSON.stringify(value);
+  return JSON.stringify(Object.keys(value).sort().reduce((out, key) => {
+    out[key] = value[key];
+    return out;
+  }, {}));
+}
+
+function quoteCacheKey(endpoint, fields) {
+  return `${endpoint}:${stableJson(fields)}`;
+}
+
+function sanitizedQuoteLog(fields) {
+  return {
+    state: fields.State,
+    birthYear: fields.BirthYear,
+    birthMonth: fields.BirthMonth,
+    sex: fields.Sex,
+    smoker: fields.Smoker,
+    health: fields.Health,
+    newCategory: fields.NewCategory,
+    faceAmount: fields.FaceAmount,
+    modeUsed: fields.ModeUsed,
+    compincCount: String(fields.COMPINC || "").split(",").filter(Boolean).length || 0,
+  };
+}
+
+function parseCompulifeJson(text, status) {
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    const raw = text.substring(0, 400);
+    return {
+      error: true,
+      status,
+      raw,
+      parseError: e.message,
+      blocked: /scraping|blocked|forbidden|denied/i.test(raw),
+      message: /scraping/i.test(raw)
+        ? "Compulife rejected this rate request. Check API credentials, request format, or rate limits."
+        : "Compulife returned a non-JSON response.",
+    };
+  }
+}
+
+function flattenCompulifeRows(data, out = []) {
+  if (!data || typeof data !== "object") return out;
+  if (Array.isArray(data)) {
+    data.forEach(item => flattenCompulifeRows(item, out));
+    return out;
+  }
+  const looksLikeQuoteRow = data.Compulife_company || data.Compulife_Company_Name ||
+    data.CompanyName || data.company || data.ProductName || data.Compulife_product ||
+    data.prodmonthly || data.Compulife_premiumM || data.Monthly || data.MonthlyPremium;
+  if (looksLikeQuoteRow) out.push(data);
+  Object.values(data).forEach(value => {
+    if (value && typeof value === "object") flattenCompulifeRows(value, out);
+  });
+  return out;
+}
+
+function normalizeCompulifeQuotes(data) {
+  return flattenCompulifeRows(data).map(row => {
+    const monthly = row.prodmonthly || row.Compulife_premiumM || row.Monthly || row.MonthlyPremium || row.monthly || "";
+    const annual = row.prodannual || row.Compulife_premiumA || row.Annual || row.AnnualPremium || row.annual || "";
+    return {
+      carrier: row.Compulife_company || row.Compulife_Company_Name || row.CompanyName || row.company || "",
+      product: row.Compulife_product || row.ProductName || row.product || "",
+      planType: row.NewCategory || row.Category || "",
+      term: row.TermPeriod || row.term || null,
+      faceAmount: row.FaceAmount || row.faceAmount || null,
+      healthClass: row.Health || row.healthClass || "",
+      tobacco: String(row.Smoker || row.smoker || "").toUpperCase() === "Y" || String(row.Smoker || row.smoker || "").toUpperCase() === "S",
+      monthlyPremium: Number(String(monthly).replace(/[^0-9.]/g, "")) || null,
+      annualPremium: Number(String(annual).replace(/[^0-9.]/g, "")) || null,
+      rawCarrierName: row.Compulife_company || row.Compulife_Company_Name || row.CompanyName || "",
+      rawProductName: row.Compulife_product || row.ProductName || "",
+      source: "Compulife",
+    };
+  });
+}
+
 // The new private quote call.
 //   userIp:  the END USER'S browser IP (passed up from the engine)
 //   fields:  the normalized quote fields (multipart formdata payload)
@@ -530,79 +617,56 @@ async function callCompulifeQuote(userIp, fields, endpoint = "/request") {
     throw new Error("COMPULIFE_AUTH_ID env var not set on Railway");
   }
   const remoteIp = userIp || SERVER_IP_FALLBACK;
-  const parseCompulifeResponse = (text, status, transport) => {
-    try {
-      const parsed = JSON.parse(text);
-      if (parsed && !parsed.error) return parsed;
-      return { error: true, status, raw: text.substring(0, 400), transport, parsed };
-    } catch (e) {
-      console.error(`[Compulife]   ${transport} failed to parse JSON response:`, text.substring(0, 400));
-      return { error: true, status, raw: text.substring(0, 400), parseError: e.message, transport };
-    }
-  };
-
   const fullPayload = {
     COMPULIFEAUTHORIZATIONID: AUTH_ID,
     REMOTE_IP: remoteIp,
     ...fields,
   };
-
-  console.log(`[Compulife] POST ${endpoint}`);
-  console.log(`[Compulife]   REMOTE_IP: ${remoteIp}${userIp ? "" : " (FALLBACK — caller did not send user IP)"}`);
-  console.log(`[Compulife]   Fields: ${Object.keys(fields).length} (${Object.keys(fields).slice(0, 6).join(", ")}...)`);
-
-  const attempts = [
-    {
-      name: "legacy-compulife-query",
-      run: () => fetch(`${COMPULIFE_BASE}${endpoint}/?COMPULIFE=${encodeURIComponent(JSON.stringify(fullPayload))}`, {
-        headers: { "User-Agent": "Mozilla/5.0 iAgentIQ" },
-      }),
-    },
-    {
-      name: "legacy-compulife-query-literal",
-      run: () => fetch(`${COMPULIFE_BASE}${endpoint}/?COMPULIFE=${JSON.stringify(fullPayload)}`, {
-        headers: { "User-Agent": "Mozilla/5.0 iAgentIQ" },
-      }),
-    },
-    {
-      name: "multipart-auth-query",
-      run: () => fetch(`${COMPULIFE_BASE}${endpoint}/?COMPULIFEAUTHORIZATIONID=${encodeURIComponent(AUTH_ID)}&REMOTE_IP=${encodeURIComponent(remoteIp)}`, {
-        method: "POST",
-        body: buildFormData(fields),
-        headers: { "User-Agent": "Mozilla/5.0 iAgentIQ" },
-      }),
-    },
-    {
-      name: "multipart-auth-body",
-      run: () => fetch(`${COMPULIFE_BASE}${endpoint}/`, {
-        method: "POST",
-        body: buildFormData(fullPayload),
-        headers: { "User-Agent": "Mozilla/5.0 iAgentIQ" },
-      }),
-    },
-    {
-      name: "form-urlencoded-auth-body",
-      run: () => fetch(`${COMPULIFE_BASE}${endpoint}/`, {
-        method: "POST",
-        body: new URLSearchParams(fullPayload),
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "User-Agent": "Mozilla/5.0 iAgentIQ",
-        },
-      }),
-    },
-  ];
-
-  const failures = [];
-  for (const attempt of attempts) {
-    const r = await attempt.run();
-    const text = await r.text();
-    console.log(`[Compulife]   ${attempt.name}: status ${r.status}, response length ${text.length}, preview ${text.substring(0, 80)}`);
-    const parsed = parseCompulifeResponse(text, r.status, attempt.name);
-    if (parsed && !parsed.error) return parsed;
-    failures.push(parsed);
+  const cacheKey = quoteCacheKey(endpoint, fields);
+  const cached = compulifeQuoteCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < COMPULIFE_QUOTE_CACHE_TTL_MS) {
+    console.log("[Compulife] cache hit", { endpoint, ...sanitizedQuoteLog(fields) });
+    return cached.data;
   }
-  return { error: true, status: failures[0]?.status || 502, message: "All Compulife quote transports failed", attempts: failures };
+  if (compulifeInFlight.has(cacheKey)) {
+    console.log("[Compulife] joined in-flight request", { endpoint, ...sanitizedQuoteLog(fields) });
+    return compulifeInFlight.get(cacheKey);
+  }
+
+  const started = Date.now();
+  const requestPromise = (async () => {
+    const url = `${COMPULIFE_BASE}${endpoint}/?COMPULIFE=${encodeURIComponent(JSON.stringify(fullPayload))}`;
+    console.log("[Compulife] quote request", { endpoint, remoteIp, ...sanitizedQuoteLog(fields) });
+    const r = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Accept": "application/json",
+        "User-Agent": "iAgentIQ Compulife API Proxy",
+      },
+    });
+    const text = await r.text();
+    const parsed = parseCompulifeJson(text, r.status);
+    const durationMs = Date.now() - started;
+    console.log("[Compulife] quote response", {
+      endpoint,
+      status: r.status,
+      durationMs,
+      blocked: !!parsed.blocked,
+      error: !!parsed.error,
+      cache: false,
+    });
+    if (!parsed.error) {
+      compulifeQuoteCache.set(cacheKey, { at: Date.now(), data: parsed });
+    }
+    return parsed;
+  })();
+
+  compulifeInFlight.set(cacheKey, requestPromise);
+  try {
+    return await requestPromise;
+  } finally {
+    compulifeInFlight.delete(cacheKey);
+  }
 }
 
 // Public (no-auth-needed-in-body) GETs — CategoryList, StateList, CompanyList, etc.
@@ -659,6 +723,27 @@ app.post("/compulife/sidebyside", async (req, res) => {
   }
 });
 
+// ─── NORMALIZED API ENDPOINT FOR ENGINE/FUTURE CLIENTS ───
+app.post("/api/compulife/quotes", async (req, res) => {
+  try {
+    const userIp = resolveCompulifeRemoteIp(req);
+    const fields = normalizeQuoteFields(req.body);
+    const required = ["State", "BirthMonth", "Birthday", "BirthYear", "Sex", "Smoker", "Health", "NewCategory", "FaceAmount", "ModeUsed"];
+    const missing = required.filter(k => fields[k] === undefined || fields[k] === "");
+    if (missing.length) {
+      return res.status(400).json({ error: true, message: `Missing required Compulife fields: ${missing.join(", ")}` });
+    }
+    const endpoint = req.body?.requestType === "request" ? "/request" : "/sidebyside";
+    const raw = await callCompulifeQuote(userIp, fields, endpoint);
+    if (raw?.error) return res.status(raw.blocked ? 429 : 502).json(raw);
+    return res.json({ quotes: normalizeCompulifeQuotes(raw), raw, source: "Compulife" });
+  } catch (e) {
+    console.error("[Compulife/api/quotes] Error:", e.message);
+    res.status(500).json({ error: true, message: e.message });
+  }
+});
+
+
 // ─── REFERENCE LOOKUPS (cache these on engine boot) ───
 app.get("/compulife/categories", async (req, res) => {
   try { res.json(await callCompulifePublic("/CategoryList")); }
@@ -689,7 +774,7 @@ app.get("/compulife/products", async (req, res) => {
 app.get("/compulife/diag", async (req, res) => {
   try {
     const out = {
-      proxy_version: "7.1.4",
+      proxy_version: "7.1.5",
       auth_id_set: !!AUTH_ID,
       server_ip_configured: SERVER_IP_FALLBACK,
       caller_ip_seen: req.headers["x-forwarded-for"] || req.ip || "?",
