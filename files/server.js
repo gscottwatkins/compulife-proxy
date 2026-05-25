@@ -465,7 +465,7 @@ const COMPULIFE_QUOTE_FIELDS = [
   "Sex", "Smoker", "Health",
   "NewCategory", "FaceAmount", "ModeUsed",
   "SortOverride1", "CompRating", "LANGUAGE",
-  "COMPINC", "PRODDIS", "MaxNumResults",
+  "COMPINC", "PRODDIS", "NumberOfCompanies", "MaxNumResults",
   // Health Analyzer additions (optional, only used when DoHeightWeight=ON)
   "DoHeightWeight", "Feet", "Inches", "Weight", "DoSmokingTobacco",
 ];
@@ -532,14 +532,39 @@ async function callCompulifeQuote(userIp, fields, endpoint = "/request") {
   const responseText = await r.text();
   console.log(`[Compulife]   Status: ${r.status}, response length: ${responseText.length}`);
 
+  const parseCompulifeResponse = (text, status, transport) => {
+    try {
+      return JSON.parse(text);
+    } catch (e) {
+      console.error(`[Compulife]   ${transport} failed to parse JSON response:`, text.substring(0, 400));
+      return { error: true, status, raw: text.substring(0, 400), parseError: e.message, transport };
+    }
+  };
+
   let parsed;
-  try {
-    parsed = JSON.parse(responseText);
-  } catch (e) {
-    console.error("[Compulife]   Failed to parse JSON response:", responseText.substring(0, 400));
-    return { error: true, status: r.status, raw: responseText.substring(0, 400), parseError: e.message };
+  try { parsed = JSON.parse(responseText); } catch {}
+  if (parsed) return parsed;
+
+  // Some Compulife accounts still reject private quote POSTs with the literal
+  // body "scraping" even though public endpoints and IP diag succeed. Fall back
+  // to Compulife's older documented query-string transport before giving up.
+  const fallbackPayload = {
+    COMPULIFEAUTHORIZATIONID: AUTH_ID,
+    REMOTE_IP: remoteIp,
+    ...fields,
+  };
+  const fallbackUrl = `${COMPULIFE_BASE}${endpoint}/?COMPULIFE=${encodeURIComponent(JSON.stringify(fallbackPayload))}`;
+  console.warn(`[Compulife]   Multipart returned non-JSON (${responseText.substring(0, 80)}). Trying COMPULIFE query fallback.`);
+  const fr = await fetch(fallbackUrl);
+  const fallbackText = await fr.text();
+  console.log(`[Compulife]   Fallback status: ${fr.status}, response length: ${fallbackText.length}`);
+  const fallbackParsed = parseCompulifeResponse(fallbackText, fr.status, "query-fallback");
+  if (fallbackParsed && !fallbackParsed.error) {
+    return fallbackParsed;
   }
-  return parsed;
+  const primaryParsed = parseCompulifeResponse(responseText, r.status, "multipart");
+  primaryParsed.fallback = fallbackParsed;
+  return primaryParsed;
 }
 
 // Public (no-auth-needed-in-body) GETs — CategoryList, StateList, CompanyList, etc.
