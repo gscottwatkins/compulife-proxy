@@ -515,7 +515,8 @@ function resolveCompulifeRemoteIp(req) {
     .filter(Boolean)[0];
   const realIp = String(req.headers["x-real-ip"] || "").trim();
   const direct = req.ip || req.socket?.remoteAddress || "";
-  const candidate = explicit || forwarded || realIp || direct || SERVER_IP_FALLBACK;
+  const usableExplicit = explicit && explicit !== SERVER_IP_FALLBACK ? explicit : "";
+  const candidate = usableExplicit || forwarded || realIp || direct || SERVER_IP_FALLBACK;
   return String(candidate).replace(/^::ffff:/, "");
 }
 
