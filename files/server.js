@@ -96,7 +96,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "iagentiq-api-hub",
-    version: "7.1.3",
+    version: "7.1.4",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
@@ -460,11 +460,11 @@ function buildFormData(fields) {
 // sending stale field names (gender, tobacco, NumberOfCompanies, action, etc.).
 const COMPULIFE_QUOTE_FIELDS = [
   "State", "ZipCode",
-  "BirthMonth", "Birthday", "BirthYear",
+  "BirthMonth", "Birthday", "BirthDay", "BirthYear",
   "ActualAge", "NearestAge",
   "Sex", "Smoker", "Health",
   "NewCategory", "FaceAmount", "ModeUsed",
-  "SortOverride1", "CompRating", "LANGUAGE",
+  "SortOverride1", "CompRating", "LANGUAGE", "ErrOnMissingZipCode",
   "COMPINC", "PRODDIS", "NumberOfCompanies", "MaxNumResults",
   // Health Analyzer additions (optional, only used when DoHeightWeight=ON)
   "DoHeightWeight", "Feet", "Inches", "Weight", "DoSmokingTobacco",
@@ -479,6 +479,7 @@ const FIELD_ALIASES = {
   category: "NewCategory",
   face: "FaceAmount",
   mode: "ModeUsed",
+  BirthDay: "Birthday",
 };
 
 function normalizeQuoteFields(body) {
@@ -493,6 +494,8 @@ function normalizeQuoteFields(body) {
   for (const k of COMPULIFE_QUOTE_FIELDS) {
     if (body[k] !== undefined) out[k] = body[k];
   }
+  if (out.Birthday !== undefined && out.BirthDay === undefined) out.BirthDay = out.Birthday;
+  if (out.BirthDay !== undefined && out.Birthday === undefined) out.Birthday = out.BirthDay;
   // Normalize Smoker: accept Y/N (canonical), S/N (legacy), or boolean
   if (out.Smoker !== undefined) {
     const v = String(out.Smoker).toUpperCase();
@@ -552,6 +555,12 @@ async function callCompulifeQuote(userIp, fields, endpoint = "/request") {
     {
       name: "legacy-compulife-query",
       run: () => fetch(`${COMPULIFE_BASE}${endpoint}/?COMPULIFE=${encodeURIComponent(JSON.stringify(fullPayload))}`, {
+        headers: { "User-Agent": "Mozilla/5.0 iAgentIQ" },
+      }),
+    },
+    {
+      name: "legacy-compulife-query-literal",
+      run: () => fetch(`${COMPULIFE_BASE}${endpoint}/?COMPULIFE=${JSON.stringify(fullPayload)}`, {
         headers: { "User-Agent": "Mozilla/5.0 iAgentIQ" },
       }),
     },
@@ -680,7 +689,7 @@ app.get("/compulife/products", async (req, res) => {
 app.get("/compulife/diag", async (req, res) => {
   try {
     const out = {
-      proxy_version: "7.1.3",
+      proxy_version: "7.1.4",
       auth_id_set: !!AUTH_ID,
       server_ip_configured: SERVER_IP_FALLBACK,
       caller_ip_seen: req.headers["x-forwarded-for"] || req.ip || "?",
