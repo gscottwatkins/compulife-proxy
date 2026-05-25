@@ -438,10 +438,10 @@ app.get("/scoreboard/live", async (req, res) => {
 //   Body: each quote field (State, BirthMonth, Sex, Health, NewCategory, etc.)
 //         as its own multipart form field, values quoted as strings.
 //
-// Compulife's quote API uses REMOTE_IP as the consumer/caller IP parameter.
-// The outbound TCP request still leaves Railway from the static egress IP;
-// hardcoding static egress as REMOTE_IP can make Compulife return the literal
-// string "scraping" instead of JSON quote rows.
+// Compulife validates REMOTE_IP against the IP whitelisted in the account.
+// Railway's outbound TCP request leaves through the static egress IP, so send
+// that same static value here. Sending the browser/user IP causes Compulife to
+// return the literal string "scraping" instead of JSON quote rows.
 // ============================================================
 
 // Helper — build a multipart/form-data body from a plain object.
@@ -508,16 +508,7 @@ function normalizeQuoteFields(body) {
 }
 
 function resolveCompulifeRemoteIp(req) {
-  const explicit = String(req.body?.REMOTE_IP || "").trim();
-  const forwarded = String(req.headers["x-forwarded-for"] || "")
-    .split(",")
-    .map(s => s.trim())
-    .filter(Boolean)[0];
-  const realIp = String(req.headers["x-real-ip"] || "").trim();
-  const direct = req.ip || req.socket?.remoteAddress || "";
-  const usableExplicit = explicit && explicit !== SERVER_IP_FALLBACK ? explicit : "";
-  const candidate = usableExplicit || forwarded || realIp || direct || SERVER_IP_FALLBACK;
-  return String(candidate).replace(/^::ffff:/, "");
+  return SERVER_IP_FALLBACK;
 }
 
 // The new private quote call.
