@@ -96,7 +96,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "iagentiq-api-hub",
-    version: "7.1.1",
+    version: "7.1.2",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
@@ -519,56 +519,73 @@ async function callCompulifeQuote(userIp, fields, endpoint = "/request") {
     throw new Error("COMPULIFE_AUTH_ID env var not set on Railway");
   }
   const remoteIp = userIp || SERVER_IP_FALLBACK;
-  const url = `${COMPULIFE_BASE}${endpoint}/?COMPULIFEAUTHORIZATIONID=${encodeURIComponent(AUTH_ID)}&REMOTE_IP=${encodeURIComponent(remoteIp)}`;
-
-  const form = buildFormData(fields);
-
-  console.log(`[Compulife] POST ${endpoint}`);
-  console.log(`[Compulife]   REMOTE_IP: ${remoteIp}${userIp ? "" : " (FALLBACK — caller did not send user IP)"}`);
-  console.log(`[Compulife]   Fields: ${Object.keys(fields).length} (${Object.keys(fields).slice(0, 6).join(", ")}...)`);
-
-  const r = await fetch(url, {
-    method: "POST",
-    body: form,
-    // NOTE: do NOT set Content-Type manually — fetch sets the multipart boundary automatically
-  });
-
-  const responseText = await r.text();
-  console.log(`[Compulife]   Status: ${r.status}, response length: ${responseText.length}`);
-
   const parseCompulifeResponse = (text, status, transport) => {
     try {
-      return JSON.parse(text);
+      const parsed = JSON.parse(text);
+      if (parsed && !parsed.error) return parsed;
+      return { error: true, status, raw: text.substring(0, 400), transport, parsed };
     } catch (e) {
       console.error(`[Compulife]   ${transport} failed to parse JSON response:`, text.substring(0, 400));
       return { error: true, status, raw: text.substring(0, 400), parseError: e.message, transport };
     }
   };
 
-  let parsed;
-  try { parsed = JSON.parse(responseText); } catch {}
-  if (parsed) return parsed;
-
-  // Some Compulife accounts still reject private quote POSTs with the literal
-  // body "scraping" even though public endpoints and IP diag succeed. Fall back
-  // to Compulife's older documented query-string transport before giving up.
-  const fallbackPayload = {
+  const fullPayload = {
     COMPULIFEAUTHORIZATIONID: AUTH_ID,
     REMOTE_IP: remoteIp,
     ...fields,
   };
-  const fallbackUrl = `${COMPULIFE_BASE}${endpoint}/?COMPULIFE=${encodeURIComponent(JSON.stringify(fallbackPayload))}`;
-  console.warn(`[Compulife]   Multipart returned non-JSON (${responseText.substring(0, 80)}). Trying COMPULIFE query fallback.`);
-  const fr = await fetch(fallbackUrl);
-  const fallbackText = await fr.text();
-  console.log(`[Compulife]   Fallback status: ${fr.status}, response length: ${fallbackText.length}`);
-  const fallbackParsed = parseCompulifeResponse(fallbackText, fr.status, "query-fallback");
-  if (fallbackParsed && !fallbackParsed.error) {
-    return fallbackParsed;
+
+  console.log(`[Compulife] POST ${endpoint}`);
+  console.log(`[Compulife]   REMOTE_IP: ${remoteIp}${userIp ? "" : " (FALLBACK — caller did not send user IP)"}`);
+  console.log(`[Compulife]   Fields: ${Object.keys(fields).length} (${Object.keys(fields).slice(0, 6).join(", ")}...)`);
+
+  const attempts = [
+    {
+      name: "legacy-compulife-query",
+      run: () => fetch(`${COMPULIFE_BASE}${endpoint}/?COMPULIFE=${encodeURIComponent(JSON.stringify(fullPayload))}`, {
+        headers: { "User-Agent": "Mozilla/5.0 iAgentIQ" },
+      }),
+    },
+    {
+      name: "multipart-auth-query",
+      run: () => fetch(`${COMPULIFE_BASE}${endpoint}/?COMPULIFEAUTHORIZATIONID=${encodeURIComponent(AUTH_ID)}&REMOTE_IP=${encodeURIComponent(remoteIp)}`, {
+        method: "POST",
+        body: buildFormData(fields),
+        headers: { "User-Agent": "Mozilla/5.0 iAgentIQ" },
+      }),
+    },
+    {
+      name: "multipart-auth-body",
+      run: () => fetch(`${COMPULIFE_BASE}${endpoint}/`, {
+        method: "POST",
+        body: buildFormData(fullPayload),
+        headers: { "User-Agent": "Mozilla/5.0 iAgentIQ" },
+      }),
+    },
+    {
+      name: "form-urlencoded-auth-body",
+      run: () => fetch(`${COMPULIFE_BASE}${endpoint}/`, {
+        method: "POST",
+        body: new URLSearchParams(fullPayload),
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "User-Agent": "Mozilla/5.0 iAgentIQ",
+        },
+      }),
+    },
+  ];
+
+  const failures = [];
+  for (const attempt of attempts) {
+    const r = await attempt.run();
+    const text = await r.text();
+    console.log(`[Compulife]   ${attempt.name}: status ${r.status}, response length ${text.length}, preview ${text.substring(0, 80)}`);
+    const parsed = parseCompulifeResponse(text, r.status, attempt.name);
+    if (parsed && !parsed.error) return parsed;
+    failures.push(parsed);
   }
-  const primaryParsed = parseCompulifeResponse(responseText, r.status, "multipart");
-  primaryParsed.fallback = fallbackParsed;
-  return primaryParsed;
+  return { error: true, status: failures[0]?.status || 502, message: "All Compulife quote transports failed", attempts: failures };
 }
 
 // Public (no-auth-needed-in-body) GETs — CategoryList, StateList, CompanyList, etc.
@@ -655,7 +672,7 @@ app.get("/compulife/products", async (req, res) => {
 app.get("/compulife/diag", async (req, res) => {
   try {
     const out = {
-      proxy_version: "7.1.1",
+      proxy_version: "7.1.2",
       auth_id_set: !!AUTH_ID,
       server_ip_configured: SERVER_IP_FALLBACK,
       caller_ip_seen: req.headers["x-forwarded-for"] || req.ip || "?",
