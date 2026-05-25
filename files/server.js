@@ -96,7 +96,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "iagentiq-api-hub",
-    version: "7.1.2",
+    version: "7.1.3",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
@@ -438,10 +438,10 @@ app.get("/scoreboard/live", async (req, res) => {
 //   Body: each quote field (State, BirthMonth, Sex, Health, NewCategory, etc.)
 //         as its own multipart form field, values quoted as strings.
 //
-// Compulife validates REMOTE_IP against the IP whitelisted in the account.
-// Railway's outbound TCP request leaves through the static egress IP, so send
-// that same static value here. Sending the browser/user IP causes Compulife to
-// return the literal string "scraping" instead of JSON quote rows.
+// Compulife validates the subscriber connection by source IP, while REMOTE_IP
+// is the end-user/browser IP used for per-user scraping controls. Railway's
+// outbound source IP still needs to be whitelisted, but REMOTE_IP should be the
+// caller where available.
 // ============================================================
 
 // Helper — build a multipart/form-data body from a plain object.
@@ -508,7 +508,15 @@ function normalizeQuoteFields(body) {
 }
 
 function resolveCompulifeRemoteIp(req) {
-  return SERVER_IP_FALLBACK;
+  const explicit = String(req.body?.REMOTE_IP || "").trim();
+  const forwarded = String(req.headers["x-forwarded-for"] || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean)[0];
+  const realIp = String(req.headers["x-real-ip"] || "").trim();
+  const direct = req.ip || req.socket?.remoteAddress || "";
+  const candidate = explicit || forwarded || realIp || direct || SERVER_IP_FALLBACK;
+  return String(candidate).replace(/^::ffff:/, "");
 }
 
 // The new private quote call.
@@ -672,7 +680,7 @@ app.get("/compulife/products", async (req, res) => {
 app.get("/compulife/diag", async (req, res) => {
   try {
     const out = {
-      proxy_version: "7.1.2",
+      proxy_version: "7.1.3",
       auth_id_set: !!AUTH_ID,
       server_ip_configured: SERVER_IP_FALLBACK,
       caller_ip_seen: req.headers["x-forwarded-for"] || req.ip || "?",
