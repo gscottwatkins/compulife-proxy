@@ -17,6 +17,7 @@ const cors = require("cors");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+app.set("trust proxy", true);
 
 // ---- Config ----
 const AUTH_ID = process.env.COMPULIFE_AUTH_ID || "";
@@ -96,7 +97,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "iagentiq-api-hub",
-    version: "7.1.5",
+    version: "7.1.6",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
@@ -511,16 +512,61 @@ function normalizeQuoteFields(body) {
   return out;
 }
 
-function resolveCompulifeRemoteIp(req) {
-  const explicit = String(req.body?.REMOTE_IP || "").trim();
-  const forwarded = String(req.headers["x-forwarded-for"] || "")
+function cleanIpCandidate(value) {
+  let ip = String(value || "").trim();
+  if (!ip || /^unknown$/i.test(ip) || /^localhost$/i.test(ip)) return "";
+  ip = ip.replace(/^::ffff:/, "");
+  if (ip.startsWith("[") && ip.includes("]")) ip = ip.slice(1, ip.indexOf("]"));
+  if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(ip)) ip = ip.replace(/:\d+$/, "");
+  return ip;
+}
+
+function isPublicIp(ip) {
+  ip = cleanIpCandidate(ip);
+  const v4 = ip.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const n = v4.slice(1).map(Number);
+    if (n.some(x => x < 0 || x > 255)) return false;
+    const [a, b] = n;
+    if (a === 10 || a === 127 || a === 0 || a === 169 && b === 254) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 168) return false;
+    if (a === 100 && b >= 64 && b <= 127) return false;
+    return true;
+  }
+  const lower = ip.toLowerCase();
+  if (!lower.includes(":")) return false;
+  if (lower === "::1" || lower.startsWith("fe80:") || lower.startsWith("fc") || lower.startsWith("fd")) return false;
+  return true;
+}
+
+function maskIp(ip) {
+  ip = cleanIpCandidate(ip);
+  const parts = ip.split(".");
+  if (parts.length === 4) return `${parts[0]}.xxx.xxx.${parts[3]}`;
+  if (ip.includes(":")) return `${ip.slice(0, 4)}:xxxx:${ip.slice(-4)}`;
+  return "";
+}
+
+function firstPublicIpFromHeader(value) {
+  return String(value || "")
     .split(",")
-    .map(s => s.trim())
-    .filter(Boolean)[0];
-  const realIp = String(req.headers["x-real-ip"] || "").trim();
-  const direct = req.ip || req.socket?.remoteAddress || "";
-  const candidate = explicit || forwarded || realIp || direct || SERVER_IP_FALLBACK;
-  return String(candidate).replace(/^::ffff:/, "");
+    .map(cleanIpCandidate)
+    .find(isPublicIp) || "";
+}
+
+function resolveCompulifeRemoteIp(req) {
+  if (process.env.NODE_ENV === "development") {
+    const devIp = cleanIpCandidate(process.env.DEV_REMOTE_IP || "");
+    if (isPublicIp(devIp)) return devIp;
+  }
+  const candidates = [
+    firstPublicIpFromHeader(req.headers["x-forwarded-for"]),
+    cleanIpCandidate(req.headers["x-real-ip"]),
+    cleanIpCandidate(req.headers["cf-connecting-ip"]),
+    cleanIpCandidate(req.socket?.remoteAddress),
+  ];
+  return candidates.find(isPublicIp) || "";
 }
 
 const COMPULIFE_QUOTE_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -565,8 +611,8 @@ function parseCompulifeJson(text, status) {
       raw,
       parseError: e.message,
       blocked: /scraping|blocked|forbidden|denied/i.test(raw),
-      message: /scraping/i.test(raw)
-        ? "Compulife rejected this rate request. Check API credentials, request format, or rate limits."
+      message: /scraping|blocked|forbidden|denied|user.?limit/i.test(raw)
+        ? "Compulife temporarily blocked this quote request because of user access limits. Try again later or verify REMOTE_IP is being passed correctly."
         : "Compulife returned a non-JSON response.",
     };
   }
@@ -616,27 +662,40 @@ async function callCompulifeQuote(userIp, fields, endpoint = "/request") {
   if (!AUTH_ID) {
     throw new Error("COMPULIFE_AUTH_ID env var not set on Railway");
   }
-  const remoteIp = userIp || SERVER_IP_FALLBACK;
+  const remoteIp = userIp;
+  if (!remoteIp || !isPublicIp(remoteIp)) {
+    return {
+      error: true,
+      status: 400,
+      message: "Unable to determine a valid public REMOTE_IP for Compulife.",
+      remoteIpIncluded: false,
+    };
+  }
   const fullPayload = {
     COMPULIFEAUTHORIZATIONID: AUTH_ID,
     REMOTE_IP: remoteIp,
     ...fields,
   };
-  const cacheKey = quoteCacheKey(endpoint, fields);
+  const cacheKey = quoteCacheKey(endpoint, Object.assign({ _remoteIp: remoteIp }, fields));
   const cached = compulifeQuoteCache.get(cacheKey);
   if (cached && Date.now() - cached.at < COMPULIFE_QUOTE_CACHE_TTL_MS) {
-    console.log("[Compulife] cache hit", { endpoint, ...sanitizedQuoteLog(fields) });
+    console.log("[Compulife] cache hit", { endpoint, remoteIpIncluded: true, remoteIpMasked: maskIp(remoteIp), ...sanitizedQuoteLog(fields) });
     return cached.data;
   }
   if (compulifeInFlight.has(cacheKey)) {
-    console.log("[Compulife] joined in-flight request", { endpoint, ...sanitizedQuoteLog(fields) });
+    console.log("[Compulife] joined in-flight request", { endpoint, remoteIpIncluded: true, remoteIpMasked: maskIp(remoteIp), ...sanitizedQuoteLog(fields) });
     return compulifeInFlight.get(cacheKey);
   }
 
   const started = Date.now();
   const requestPromise = (async () => {
     const url = `${COMPULIFE_BASE}${endpoint}/?COMPULIFE=${encodeURIComponent(JSON.stringify(fullPayload))}`;
-    console.log("[Compulife] quote request", { endpoint, remoteIp, ...sanitizedQuoteLog(fields) });
+    console.log("[Compulife] quote request", {
+      endpoint,
+      remoteIpIncluded: true,
+      remoteIpMasked: maskIp(remoteIp),
+      ...sanitizedQuoteLog(fields),
+    });
     const r = await fetch(url, {
       method: "GET",
       headers: {
@@ -653,6 +712,7 @@ async function callCompulifeQuote(userIp, fields, endpoint = "/request") {
       durationMs,
       blocked: !!parsed.blocked,
       error: !!parsed.error,
+      errorMessage: parsed.error ? parsed.message : undefined,
       cache: false,
     });
     if (!parsed.error) {
@@ -774,10 +834,12 @@ app.get("/compulife/products", async (req, res) => {
 app.get("/compulife/diag", async (req, res) => {
   try {
     const out = {
-      proxy_version: "7.1.5",
+      proxy_version: "7.1.6",
       auth_id_set: !!AUTH_ID,
       server_ip_configured: SERVER_IP_FALLBACK,
-      caller_ip_seen: req.headers["x-forwarded-for"] || req.ip || "?",
+      caller_ip_seen_masked: maskIp(resolveCompulifeRemoteIp(req) || req.ip || "?"),
+      remote_ip_would_send: maskIp(resolveCompulifeRemoteIp(req)),
+      remote_ip_included: !!resolveCompulifeRemoteIp(req),
       compulife_sees_us_as: null,
       whitelist_match: null,
       timestamp: new Date().toISOString(),
