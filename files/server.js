@@ -4,7 +4,7 @@
 // Deploy: Railway with Static Egress IP (162.220.232.99)
 // Updated: May 13, 2026 — Compulife proxy rewritten to match official API spec:
 //   - POST multipart/form-data (was: GET with JSON in query string)
-//   - REMOTE_IP passed per-request from caller/Railway forwarded headers
+//   - REMOTE_IP passed per-request from caller (was: hardcoded server IP)
 //   - Auth + REMOTE_IP in URL query params, all other fields in formdata body
 //   - Diagnostic endpoint /compulife/diag for sanity checks
 //   - Telnyx + Postmark removed; SMS and Email both go via GHL now
@@ -438,10 +438,10 @@ app.get("/scoreboard/live", async (req, res) => {
 //   Body: each quote field (State, BirthMonth, Sex, Health, NewCategory, etc.)
 //         as its own multipart form field, values quoted as strings.
 //
-// Compulife's quote API uses REMOTE_IP as the consumer/caller IP parameter.
-// The outbound TCP request still leaves Railway from the static egress IP;
-// do not hardcode that static egress as REMOTE_IP or Compulife can respond
-// with the literal string "scraping" instead of JSON quote rows.
+// REMOTE_IP must be the IP whitelisted with Compulife. In production that is
+// Railway's static egress IP, not the user's browser IP. Passing x-forwarded-for
+// can make Compulife return "scraping" or empty result sets even though the
+// request shape is otherwise valid.
 // ============================================================
 
 // Helper — build a multipart/form-data body from a plain object.
@@ -507,18 +507,6 @@ function normalizeQuoteFields(body) {
   return out;
 }
 
-function resolveCompulifeRemoteIp(req) {
-  const explicit = String(req.body?.REMOTE_IP || "").trim();
-  const forwarded = String(req.headers["x-forwarded-for"] || "")
-    .split(",")
-    .map(s => s.trim())
-    .filter(Boolean)[0];
-  const realIp = String(req.headers["x-real-ip"] || "").trim();
-  const direct = req.ip || req.socket?.remoteAddress || "";
-  const candidate = explicit || forwarded || realIp || direct || SERVER_IP_FALLBACK;
-  return String(candidate).replace(/^::ffff:/, "");
-}
-
 // The new private quote call.
 //   userIp:  the END USER'S browser IP (passed up from the engine)
 //   fields:  the normalized quote fields (multipart formdata payload)
@@ -571,7 +559,7 @@ async function callCompulifePublic(endpoint) {
 // The engine calls this with all quote fields in the body, plus REMOTE_IP.
 app.post("/compulife/quote", async (req, res) => {
   try {
-    const userIp = resolveCompulifeRemoteIp(req);
+    const userIp = SERVER_IP_FALLBACK;
     const fields = normalizeQuoteFields(req.body);
 
     // Basic validation — fail fast with a useful message instead of letting
@@ -598,7 +586,7 @@ app.post("/compulife/quote", async (req, res) => {
 // Compulife's pre-formatted spreadsheet-style endpoint. Same field shape.
 app.post("/compulife/sidebyside", async (req, res) => {
   try {
-    const userIp = resolveCompulifeRemoteIp(req);
+    const userIp = SERVER_IP_FALLBACK;
     const fields = normalizeQuoteFields(req.body);
     const result = await callCompulifeQuote(userIp, fields, "/sidebyside");
     return res.json(result);
@@ -668,7 +656,7 @@ app.get("/compulife/diag", async (req, res) => {
 app.post("/", async (req, res) => {
   try {
     const action = (req.body || {}).action || "ping";
-    const userIp = resolveCompulifeRemoteIp(req);
+    const userIp = SERVER_IP_FALLBACK;
     switch (action) {
       case "ping":
         return res.json({ status: "ok", service: "compulife-proxy", timestamp: new Date().toISOString() });
