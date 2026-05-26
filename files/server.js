@@ -1173,6 +1173,23 @@ app.post("/ghl/conversations/messages", async (req, res) => {
     const payload = { type: req.body.type || "SMS", contactId: req.body.contactId, message: req.body.message };
     if (req.body.subject) payload.subject = req.body.subject;
     if (req.body.html) payload.html = req.body.html;
+    if (!payload.html && req.body.templatePreviewUrl) {
+      const previewUrl = new URL(String(req.body.templatePreviewUrl));
+      if (previewUrl.hostname !== "firebasestorage.googleapis.com" || !previewUrl.pathname.includes("/highlevel-backend.appspot.com/")) {
+        return res.status(400).json({ error: true, message: "Unsupported email template preview URL" });
+      }
+      const templateResp = await fetch(previewUrl.toString(), { headers: { "Accept": "text/html" } });
+      const templateHtml = await templateResp.text();
+      if (!templateResp.ok || !templateHtml || /<Error>|NoSuchKey|AccessDenied/i.test(templateHtml.slice(0, 500))) {
+        return res.status(502).json({
+          error: true,
+          message: `Unable to fetch GHL email template preview (${templateResp.status})`,
+          templateId: req.body.templateId || "",
+          templateName: req.body.templateName || "",
+        });
+      }
+      payload.html = templateHtml;
+    }
     if (req.body.emailFrom) payload.emailFrom = req.body.emailFrom;
     if (req.body.attachments) payload.attachments = req.body.attachments;
     res.json(await ghlFetch("POST", "/conversations/messages", payload));
