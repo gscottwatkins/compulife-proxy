@@ -72,7 +72,7 @@ app.use(cors({
     if (ALLOWED_ORIGINS.indexOf(origin) !== -1) return callback(null, true);
     return callback(new Error("CORS: Origin " + origin + " not allowed"), false);
   },
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true,
 }));
@@ -124,6 +124,10 @@ app.get("/", (req, res) => {
       "POST   /lead-card/upload",
       "POST   /scoreboard/event",
       "POST   /production/entry",
+      "GET    /production/entries",
+      "PATCH  /production/entry/:id",
+      "DELETE /production/entry/:id",
+      "GET    /brochure-mappings",
       "GET    /scoreboard/live",
     ],
   });
@@ -368,6 +372,76 @@ app.post("/production/entry", async (req, res) => {
       },
     }).catch(() => {});
     res.json({ ok: true, entry: Array.isArray(inserted) ? inserted[0] : inserted });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message, detail: e.data || null });
+  }
+});
+
+app.get("/production/entries", async (req, res) => {
+  try {
+    const params = new URLSearchParams({
+      select: "*",
+      order: "sold_date.desc,created_at.desc",
+      limit: String(req.query.limit || 500),
+    });
+    if (req.query.since) params.set("sold_date", `gte.${req.query.since}`);
+    const rows = await supabaseRest("GET", "production_entries", { query: params.toString() });
+    res.json({ ok: true, entries: rows || [] });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message, detail: e.data || null });
+  }
+});
+
+app.patch("/production/entry/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ ok: false, error: "id required" });
+    const b = req.body || {};
+    const row = {};
+    if ("date" in b || "sold_date" in b) row.sold_date = b.sold_date || b.date || null;
+    if ("client" in b || "client_name" in b) row.client_name = b.client_name || b.client || "";
+    if ("carrier" in b) row.carrier = b.carrier || "";
+    if ("product" in b) row.product = b.product || "";
+    if ("coverage" in b || "coverage_amount" in b) row.coverage_amount = Number(b.coverage_amount || b.coverage || 0);
+    if ("premiumAnnual" in b || "annual_premium" in b) row.annual_premium = Number(b.annual_premium || b.premiumAnnual || 0);
+    if ("premiumMonthly" in b || "monthly_premium" in b) row.monthly_premium = Number(b.monthly_premium || b.premiumMonthly || 0);
+    if ("agent" in b || "agent_id" in b) row.agent_id = b.agent_id || b.agent || "";
+    if ("agent_name" in b) row.agent_name = b.agent_name || "";
+    if ("status" in b || "policy_status" in b) row.policy_status = b.policy_status || b.status || "pending";
+    const updated = await supabaseRest("PATCH", "production_entries", {
+      query: new URLSearchParams({ id: `eq.${id}` }).toString(),
+      body: row,
+    });
+    res.json({ ok: true, entry: Array.isArray(updated) ? updated[0] : updated });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message, detail: e.data || null });
+  }
+});
+
+app.delete("/production/entry/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id || "").trim();
+    if (!id) return res.status(400).json({ ok: false, error: "id required" });
+    const deleted = await supabaseRest("DELETE", "production_entries", {
+      query: new URLSearchParams({ id: `eq.${id}` }).toString(),
+    });
+    res.json({ ok: true, entry: Array.isArray(deleted) ? deleted[0] : deleted });
+  } catch (e) {
+    res.status(e.status || 500).json({ ok: false, error: e.message, detail: e.data || null });
+  }
+});
+
+app.get("/brochure-mappings", async (req, res) => {
+  try {
+    const params = new URLSearchParams({
+      select: "*",
+      active: "eq.true",
+      order: "brochure_type.asc,carrier.asc,product_name.asc",
+      limit: String(req.query.limit || 500),
+    });
+    if (req.query.plan_type) params.set("plan_type", `eq.${req.query.plan_type}`);
+    const rows = await supabaseRest("GET", "brochure_mappings", { query: params.toString() });
+    res.json({ ok: true, mappings: rows || [] });
   } catch (e) {
     res.status(e.status || 500).json({ ok: false, error: e.message, detail: e.data || null });
   }
