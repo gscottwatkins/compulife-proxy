@@ -37,7 +37,6 @@ const GCP_VISION_API_KEY = process.env.GCP_VISION_API_KEY || "";
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const LEAD_CARDS_BUCKET = process.env.SUPABASE_LEAD_CARDS_BUCKET || "lead-cards";
-const BROCHURE_BUCKET = process.env.SUPABASE_BROCHURE_BUCKET || "brochures";
 
 // ---- CORS (full origin list) ----
 // Required production origins are always allowed. ALLOWED_ORIGINS may add
@@ -143,13 +142,6 @@ function safeStorageSegment(value, fallback = "lead") {
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 80) || fallback;
-}
-
-function encodeStoragePath(path) {
-  return String(path || "")
-    .split("/")
-    .map(part => encodeURIComponent(part))
-    .join("/");
 }
 
 function extFromMime(mimeType, fileName = "") {
@@ -266,94 +258,6 @@ app.get("/lead-card/diag", (req, res) => {
     jwtRef: claims?.ref || null,
     jwtExp: claims?.exp ? new Date(claims.exp * 1000).toISOString() : null,
   });
-});
-
-// ============================================================
-// ONE-PURPOSE BROCHURE STORAGE — Supabase public bucket
-// ============================================================
-async function uploadPublicBrochurePdf(objectPath, base64, fileName = "brochure.pdf") {
-  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-    throw new Error("Supabase storage is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_KEY in Railway.");
-  }
-  const cleanBase64 = String(base64 || "").includes(",") ? String(base64).split(",").pop() : String(base64 || "");
-  const buffer = Buffer.from(cleanBase64, "base64");
-  if (!buffer.length) throw new Error("Empty decoded file");
-  if (buffer.slice(0, 4).toString("utf8") !== "%PDF") {
-    throw new Error(`${fileName} must be a PDF`);
-  }
-
-  const uploadUrl = `${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(BROCHURE_BUCKET)}/${encodeStoragePath(objectPath)}`;
-  const uploadResp = await fetch(uploadUrl, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
-      "apikey": SUPABASE_SERVICE_KEY,
-      "Content-Type": "application/pdf",
-      "x-upsert": "true",
-    },
-    body: buffer,
-  });
-
-  const uploadText = await uploadResp.text();
-  if (!uploadResp.ok) {
-    const err = new Error("Supabase brochure upload failed");
-    err.status = uploadResp.status;
-    err.data = uploadText.slice(0, 500);
-    throw err;
-  }
-
-  return {
-    bucket: BROCHURE_BUCKET,
-    path: objectPath,
-    url: `${SUPABASE_URL}/storage/v1/object/public/${encodeURIComponent(BROCHURE_BUCKET)}/${encodeStoragePath(objectPath)}`,
-    size: buffer.length,
-  };
-}
-
-async function upsertBrochureMapping(row) {
-  const query = new URLSearchParams({
-    plan_type: `eq.${row.plan_type}`,
-    brochure_type: `eq.${row.brochure_type}`,
-    carrier: `eq.${row.carrier}`,
-    product_name: "is.null",
-  }).toString();
-  const updated = await supabaseRest("PATCH", "brochure_mappings", { query, body: row });
-  if (Array.isArray(updated) && updated.length) return updated;
-  return supabaseRest("POST", "brochure_mappings", { body: row });
-}
-
-app.post("/admin/upload-iule-brochure", async (req, res) => {
-  try {
-    const objectPath = "carrier-brochures/MoO/IUL/United of Omaha IULE Customer Brochure.pdf";
-    const { base64 = "", fileName = "United of Omaha IULE Customer Brochure.pdf" } = req.body || {};
-    if (!base64 || typeof base64 !== "string") {
-      return res.status(400).json({ ok: false, error: "Missing base64 PDF content" });
-    }
-
-    const uploaded = await uploadPublicBrochurePdf(objectPath, base64, fileName);
-    const display_label = "United of Omaha IUL Express Customer Brochure";
-    const rows = [];
-    for (const plan_type of ["IUL / Cash Value", "IUL / Cash Back"]) {
-      for (const carrier of ["Mutual of Omaha", "United of Omaha"]) {
-        const saved = await upsertBrochureMapping({
-          plan_type,
-          carrier,
-          product_name: null,
-          brochure_type: "carrier_product_brochure",
-          brochure_url: uploaded.url,
-          active: true,
-          display_label,
-          updated_at: new Date().toISOString(),
-        });
-        rows.push(...(Array.isArray(saved) ? saved : [saved]));
-      }
-    }
-
-    res.json({ ok: true, brochure: uploaded, mappings: rows });
-  } catch (e) {
-    console.error("[Brochure] IULE upload error:", e);
-    res.status(e.status || 500).json({ ok: false, error: e.message || "Brochure upload failed", detail: e.data || null });
-  }
 });
 
 // ============================================================
