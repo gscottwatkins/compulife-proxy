@@ -752,7 +752,7 @@ function normalizeCompulifeQuotes(data) {
 
 // The private quote call.
 //   userIp:  the END USER'S browser IP resolved from forwarded request headers.
-//   fields:  the normalized quote fields for Compulife's COMPULIFE JSON payload.
+//   fields:  the normalized quote fields submitted as multipart form fields.
 async function callCompulifeQuote(userIp, fields, endpoint = "/request") {
   if (!AUTH_ID) {
     throw new Error("COMPULIFE_AUTH_ID env var not set on Railway");
@@ -766,11 +766,6 @@ async function callCompulifeQuote(userIp, fields, endpoint = "/request") {
       remoteIpIncluded: false,
     };
   }
-  const fullPayload = {
-    COMPULIFEAUTHORIZATIONID: AUTH_ID,
-    REMOTE_IP: remoteIp,
-    ...fields,
-  };
   const cacheKey = quoteCacheKey(endpoint, Object.assign({ _remoteIp: remoteIp }, fields));
   const cached = compulifeQuoteCache.get(cacheKey);
   if (cached && Date.now() - cached.at < COMPULIFE_QUOTE_CACHE_TTL_MS) {
@@ -784,7 +779,11 @@ async function callCompulifeQuote(userIp, fields, endpoint = "/request") {
 
   const started = Date.now();
   const requestPromise = (async () => {
-    const url = `${COMPULIFE_BASE}${endpoint}/?COMPULIFE=${encodeURIComponent(JSON.stringify(fullPayload))}`;
+    const params = new URLSearchParams({
+      COMPULIFEAUTHORIZATIONID: AUTH_ID,
+      REMOTE_IP: remoteIp,
+    });
+    const url = `${COMPULIFE_BASE}${endpoint}/?${params.toString()}`;
     console.log("[Compulife] quote request", {
       endpoint,
       remoteIpIncluded: true,
@@ -792,11 +791,12 @@ async function callCompulifeQuote(userIp, fields, endpoint = "/request") {
       ...sanitizedQuoteLog(fields),
     });
     const r = await fetch(url, {
-      method: "GET",
+      method: "POST",
       headers: {
         "Accept": "application/json",
         "User-Agent": "iAgentIQ Compulife API Proxy",
       },
+      body: buildFormData(fields),
     });
     const text = await r.text();
     const parsed = parseCompulifeJson(text, r.status);
@@ -810,7 +810,7 @@ async function callCompulifeQuote(userIp, fields, endpoint = "/request") {
       errorMessage: parsed.error ? parsed.message : undefined,
       cache: false,
     });
-    if (parsed.blocked && !parsed.status) parsed.status = 429;
+    if (parsed.blocked && (!parsed.status || parsed.status < 400)) parsed.status = 429;
     if (!parsed.error) {
       compulifeQuoteCache.set(cacheKey, { at: Date.now(), data: parsed });
     }
