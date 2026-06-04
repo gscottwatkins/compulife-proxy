@@ -932,7 +932,7 @@ app.get("/compulife/diag", async (req, res) => {
   try {
     const remoteIpInfo = resolveCompulifeRemoteIpInfo(req);
     const out = {
-      proxy_version: "7.1.7",
+      proxy_version: "7.1.8",
       auth_id_set: !!AUTH_ID,
       server_ip_configured: SERVER_IP_FALLBACK,
       caller_ip_seen_masked: maskIp(remoteIpInfo.ip || req.ip || "?"),
