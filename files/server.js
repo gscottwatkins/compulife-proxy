@@ -43,6 +43,7 @@ const QUOTEIT_PROXY_SHARED_TOKEN = process.env.QUOTEIT_PROXY_SHARED_TOKEN || "";
 const REMOTE_BROCHURE_URLS = {
   "gerber-guaranteed-life": "https://engine.iagentiq.com/brochures/GL_Product_Brochure.pdf",
 };
+const CARRIER_LOGO_CODES = new Set(["TIER", "ROYA", "AMGE", "CICA", "INDE", "UTOM", "AMSV", "SENA", "GERB"]);
 
 // ---- CORS (full origin list) ----
 // Required production origins are always allowed. ALLOWED_ORIGINS may add
@@ -159,6 +160,7 @@ app.get("/", (req, res) => {
 app.use([
   "/lead-card",
   "/brochure/file",
+  "/carrier-logo",
   "/scoreboard",
   "/production",
   "/brochure-mappings",
@@ -407,6 +409,28 @@ app.get("/brochure/file/remote-key/:key", async (req, res) => {
   } catch (e) {
     console.error("[Brochure] remote key proxy error:", e);
     return res.status(500).json({ ok: false, error: e.message || "Remote brochure key proxy failed" });
+  }
+});
+
+app.get("/carrier-logo/:file", async (req, res) => {
+  try {
+    const file = String(req.params.file || "");
+    const match = file.match(/^([A-Z]{3,4})-(small|medium|large)\.png$/);
+    if (!match || !CARRIER_LOGO_CODES.has(match[1])) {
+      return res.status(404).json({ ok: false, error: "Carrier logo not found." });
+    }
+    const remoteUrl = `https://www.compulifeapi.com/images/logosapi/${file}`;
+    const remoteResp = await fetch(remoteUrl);
+    if (!remoteResp.ok) {
+      return res.status(remoteResp.status).json({ ok: false, error: "Carrier logo unavailable." });
+    }
+    res.setHeader("Content-Type", remoteResp.headers.get("content-type") || "image/png");
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    const arrayBuffer = await remoteResp.arrayBuffer();
+    return res.send(Buffer.from(arrayBuffer));
+  } catch (e) {
+    console.error("[CarrierLogo] proxy error:", e);
+    return res.status(500).json({ ok: false, error: e.message || "Carrier logo proxy failed" });
   }
 });
 
