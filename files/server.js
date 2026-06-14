@@ -37,7 +37,12 @@ const GCP_VISION_API_KEY = process.env.GCP_VISION_API_KEY || "";
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const LEAD_CARDS_BUCKET = process.env.SUPABASE_LEAD_CARDS_BUCKET || "lead-cards";
+const BROCHURES_BUCKET = process.env.SUPABASE_BROCHURES_BUCKET || "brochures";
+const BROCHURES_PREFIX = process.env.SUPABASE_BROCHURES_PREFIX || "carrier-brochures";
 const QUOTEIT_PROXY_SHARED_TOKEN = process.env.QUOTEIT_PROXY_SHARED_TOKEN || "";
+const REMOTE_BROCHURE_URLS = {
+  "gerber-guaranteed-life": "https://engine.iagentiq.com/brochures/GL_Product_Brochure.pdf",
+};
 
 // ---- CORS (full origin list) ----
 // Required production origins are always allowed. ALLOWED_ORIGINS may add
@@ -153,6 +158,7 @@ app.get("/", (req, res) => {
 
 app.use([
   "/lead-card",
+  "/brochure/file",
   "/scoreboard",
   "/production",
   "/brochure-mappings",
@@ -317,6 +323,90 @@ app.get("/lead-card/file/*", async (req, res) => {
   } catch (e) {
     console.error("[LeadCard] file proxy error:", e);
     return res.status(500).json({ ok: false, error: e.message || "Lead card file proxy failed" });
+  }
+});
+
+function streamResponseHeaders(res, upstream, fileName, cacheControl = "private, max-age=300") {
+  res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/octet-stream");
+  res.setHeader("Cache-Control", cacheControl);
+  res.setHeader("Content-Disposition", `inline; filename="${String(fileName || "file").replace(/"/g, "")}"`);
+}
+
+app.get("/brochure/file/storage/*", async (req, res) => {
+  try {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+      return res.status(500).json({ ok: false, error: "Brochure storage is not configured." });
+    }
+    const objectPath = String(req.params[0] || "").replace(/^\/+/, "");
+    if (!objectPath || objectPath.includes("..")) {
+      return res.status(400).json({ ok: false, error: "Invalid brochure path." });
+    }
+
+    const fullPath = [BROCHURES_PREFIX, objectPath].filter(Boolean).join("/");
+    const storageUrl = `${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(BROCHURES_BUCKET)}/${encodeStoragePath(fullPath)}`;
+    const storageResp = await fetch(storageUrl, {
+      headers: {
+        "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
+        "apikey": SUPABASE_SERVICE_KEY,
+      },
+    });
+    if (!storageResp.ok) {
+      const detail = await storageResp.text().catch(() => "");
+      return res.status(storageResp.status).json({
+        ok: false,
+        error: "Brochure file unavailable.",
+        detail: detail.slice(0, 250),
+      });
+    }
+
+    streamResponseHeaders(res, storageResp, objectPath.split("/").pop() || "brochure.pdf", "public, max-age=3600");
+    const arrayBuffer = await storageResp.arrayBuffer();
+    return res.send(Buffer.from(arrayBuffer));
+  } catch (e) {
+    console.error("[Brochure] storage proxy error:", e);
+    return res.status(500).json({ ok: false, error: e.message || "Brochure file proxy failed" });
+  }
+});
+
+app.get("/brochure/file/remote/*", async (req, res) => {
+  try {
+    const raw = decodeURIComponent(String(req.params[0] || ""));
+    const remoteUrl = new URL(raw);
+    const allowedHosts = new Set(["engine.iagentiq.com"]);
+    if (remoteUrl.protocol !== "https:" || !allowedHosts.has(remoteUrl.hostname)) {
+      return res.status(400).json({ ok: false, error: "Remote brochure host is not allowed." });
+    }
+    const remoteResp = await fetch(remoteUrl.toString());
+    if (!remoteResp.ok) {
+      return res.status(remoteResp.status).json({ ok: false, error: "Remote brochure unavailable." });
+    }
+
+    streamResponseHeaders(res, remoteResp, remoteUrl.pathname.split("/").pop() || "brochure.pdf", "public, max-age=3600");
+    const arrayBuffer = await remoteResp.arrayBuffer();
+    return res.send(Buffer.from(arrayBuffer));
+  } catch (e) {
+    console.error("[Brochure] remote proxy error:", e);
+    return res.status(500).json({ ok: false, error: e.message || "Remote brochure proxy failed" });
+  }
+});
+
+app.get("/brochure/file/remote-key/:key", async (req, res) => {
+  try {
+    const key = safeStorageSegment(req.params.key || "");
+    const target = REMOTE_BROCHURE_URLS[key];
+    if (!target) return res.status(404).json({ ok: false, error: "Remote brochure key not found." });
+    const remoteUrl = new URL(target);
+    const remoteResp = await fetch(remoteUrl.toString());
+    if (!remoteResp.ok) {
+      return res.status(remoteResp.status).json({ ok: false, error: "Remote brochure unavailable." });
+    }
+
+    streamResponseHeaders(res, remoteResp, remoteUrl.pathname.split("/").pop() || "brochure.pdf", "public, max-age=3600");
+    const arrayBuffer = await remoteResp.arrayBuffer();
+    return res.send(Buffer.from(arrayBuffer));
+  } catch (e) {
+    console.error("[Brochure] remote key proxy error:", e);
+    return res.status(500).json({ ok: false, error: e.message || "Remote brochure key proxy failed" });
   }
 });
 
