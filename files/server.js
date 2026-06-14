@@ -187,6 +187,25 @@ function extFromMime(mimeType, fileName = "") {
   return "jpg";
 }
 
+function encodeStoragePath(objectPath) {
+  return String(objectPath || "")
+    .split("/")
+    .filter(Boolean)
+    .map(segment => encodeURIComponent(segment))
+    .join("/");
+}
+
+function publicLeadCardUrl(req, objectPath) {
+  const publicBase = String(req.headers["x-quoteit-public-base"] || "").split(",")[0].trim().replace(/\/+$/, "");
+  if (publicBase) return `${publicBase}/lead-card/file/${encodeStoragePath(objectPath)}`;
+  const forwardedHost = String(req.headers["x-forwarded-host"] || "").split(",")[0].trim();
+  const host = forwardedHost || String(req.headers.host || "").split(",")[0].trim();
+  const forwardedProto = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim();
+  const proto = forwardedProto || (host.includes("localhost") ? "http" : "https");
+  const encodedPath = encodeStoragePath(objectPath);
+  return host ? `${proto}://${host}/lead-card/file/${encodedPath}` : `/lead-card/file/${encodedPath}`;
+}
+
 app.post("/lead-card/upload", async (req, res) => {
   try {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
@@ -247,12 +266,11 @@ app.post("/lead-card/upload", async (req, res) => {
       });
     }
 
-    const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${encodeURIComponent(LEAD_CARDS_BUCKET)}/${objectPath}`;
     return res.json({
       ok: true,
       bucket: LEAD_CARDS_BUCKET,
       path: objectPath,
-      url: publicUrl,
+      url: publicLeadCardUrl(req, objectPath),
       mimeType,
       size: buffer.length,
       pageNum,
@@ -261,6 +279,44 @@ app.post("/lead-card/upload", async (req, res) => {
   } catch (e) {
     console.error("[LeadCard] upload error:", e);
     return res.status(500).json({ ok: false, error: e.message || "Lead card upload failed" });
+  }
+});
+
+app.get("/lead-card/file/*", async (req, res) => {
+  try {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+      return res.status(500).json({ ok: false, error: "Lead card storage is not configured." });
+    }
+    const objectPath = String(req.params[0] || "").replace(/^\/+/, "");
+    if (!objectPath || objectPath.includes("..")) {
+      return res.status(400).json({ ok: false, error: "Invalid lead card path." });
+    }
+
+    const storageUrl = `${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(LEAD_CARDS_BUCKET)}/${encodeStoragePath(objectPath)}`;
+    const storageResp = await fetch(storageUrl, {
+      headers: {
+        "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
+        "apikey": SUPABASE_SERVICE_KEY,
+      },
+    });
+    if (!storageResp.ok) {
+      const detail = await storageResp.text().catch(() => "");
+      return res.status(storageResp.status).json({
+        ok: false,
+        error: "Lead card file unavailable.",
+        detail: detail.slice(0, 250),
+      });
+    }
+
+    res.setHeader("Content-Type", storageResp.headers.get("content-type") || "application/octet-stream");
+    res.setHeader("Cache-Control", "private, max-age=300");
+    const fileName = objectPath.split("/").pop() || "lead-card";
+    res.setHeader("Content-Disposition", `inline; filename="${fileName.replace(/"/g, "")}"`);
+    const arrayBuffer = await storageResp.arrayBuffer();
+    return res.send(Buffer.from(arrayBuffer));
+  } catch (e) {
+    console.error("[LeadCard] file proxy error:", e);
+    return res.status(500).json({ ok: false, error: e.message || "Lead card file proxy failed" });
   }
 });
 
