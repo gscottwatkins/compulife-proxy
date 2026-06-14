@@ -37,6 +37,7 @@ const GCP_VISION_API_KEY = process.env.GCP_VISION_API_KEY || "";
 const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const LEAD_CARDS_BUCKET = process.env.SUPABASE_LEAD_CARDS_BUCKET || "lead-cards";
+const QUOTEIT_PROXY_SHARED_TOKEN = process.env.QUOTEIT_PROXY_SHARED_TOKEN || "";
 
 // ---- CORS (full origin list) ----
 // Required production origins are always allowed. ALLOWED_ORIGINS may add
@@ -73,7 +74,7 @@ app.use(cors({
     return callback(new Error("CORS: Origin " + origin + " not allowed"), false);
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-QuoteIt-Proxy-Token"],
   credentials: true,
 }));
 
@@ -88,6 +89,23 @@ app.options("*", cors({
 }));
 
 app.use(express.json({ limit: "35mb" }));
+
+function proxyTokenAuthorized(req) {
+  if (!QUOTEIT_PROXY_SHARED_TOKEN) return true;
+  const headerToken = String(req.headers["x-quoteit-proxy-token"] || "").trim();
+  const auth = String(req.headers.authorization || "");
+  const bearer = auth.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() || "";
+  return headerToken === QUOTEIT_PROXY_SHARED_TOKEN || bearer === QUOTEIT_PROXY_SHARED_TOKEN;
+}
+
+function requireQuoteItProxyToken(req, res, next) {
+  if (proxyTokenAuthorized(req)) return next();
+  return res.status(401).json({
+    ok: false,
+    error: "unauthorized",
+    message: "QuoteIt gateway authorization required.",
+  });
+}
 
 // ============================================================
 // HEALTH CHECK
@@ -132,6 +150,21 @@ app.get("/", (req, res) => {
     ],
   });
 });
+
+app.use([
+  "/lead-card",
+  "/scoreboard",
+  "/production",
+  "/brochure-mappings",
+  "/compulife",
+  "/api/compulife",
+  "/drive",
+  "/vision",
+  "/ghl",
+  "/anthropic",
+  "/ai",
+  "/scan-lead",
+], requireQuoteItProxyToken);
 
 // ============================================================
 // LEAD CARD STORAGE — Supabase public bucket
