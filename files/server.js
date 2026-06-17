@@ -588,6 +588,7 @@ app.get("/production/entries", async (req, res) => {
       limit: String(req.query.limit || 500),
     });
     if (req.query.since) params.set("sold_date", `gte.${req.query.since}`);
+    if (req.query.agent) params.set("agent_id", `eq.${String(req.query.agent).trim()}`);
     const rows = await supabaseRest("GET", "production_entries", { query: params.toString() });
     res.json({ ok: true, entries: rows || [] });
   } catch (e) {
@@ -611,6 +612,9 @@ app.patch("/production/entry/:id", async (req, res) => {
     if ("agent" in b || "agent_id" in b) row.agent_id = b.agent_id || b.agent || "";
     if ("agent_name" in b) row.agent_name = b.agent_name || "";
     if ("status" in b || "policy_status" in b) row.policy_status = b.policy_status || b.status || "pending";
+    if ("policy_number" in b || "policyNumber" in b) row.policy_number = b.policy_number || b.policyNumber || "";
+    if ("source" in b) row.source = b.source || "engine";
+    if ("metadata" in b) row.metadata = b.metadata || {};
     const updated = await supabaseRest("PATCH", "production_entries", {
       query: new URLSearchParams({ id: `eq.${id}` }).toString(),
       body: row,
@@ -664,21 +668,26 @@ app.get("/scoreboard/live", async (req, res) => {
   try {
     const period = ["day", "week", "month", "year"].includes(req.query.period) ? req.query.period : "day";
     const since = req.query.since || startForPeriod(period);
-    const eventQuery = new URLSearchParams({
+    const eventParams = new URLSearchParams({
       select: "*",
       created_at: `gte.${since}`,
       order: "created_at.desc",
       limit: String(req.query.limit || 500),
-    }).toString();
-    const prodQuery = new URLSearchParams({
+    });
+    const prodParams = new URLSearchParams({
       select: "*",
       created_at: `gte.${since}`,
       order: "created_at.desc",
       limit: String(req.query.limit || 500),
-    }).toString();
+    });
+    if (req.query.agent) {
+      const agent = String(req.query.agent).trim();
+      eventParams.set("agent_id", `eq.${agent}`);
+      prodParams.set("agent_id", `eq.${agent}`);
+    }
     const [events, production] = await Promise.all([
-      supabaseRest("GET", "scoreboard_events", { query: eventQuery }),
-      supabaseRest("GET", "production_entries", { query: prodQuery }),
+      supabaseRest("GET", "scoreboard_events", { query: eventParams.toString() }),
+      supabaseRest("GET", "production_entries", { query: prodParams.toString() }),
     ]);
     const agents = {};
     for (const ev of events || []) {
