@@ -157,6 +157,7 @@ app.get("/", (req, res) => {
     endpoints: [
       "POST   /compulife/quote",
       "POST   /itk/quoter",
+      "GET    /itk/companies",
       "POST   /itk/questionnaire/search/drug",
       "POST   /itk/questionnaire/search/condition",
       "POST   /itk/questionnaire/traversal",
@@ -1199,6 +1200,16 @@ app.post("/itk/quoter", async (req, res) => {
     res.json({ ok: true, source: "ITK", result });
   } catch (e) {
     console.error("[ITK/quoter] Error:", e.message);
+    res.status(e.status || 500).json({ ok: false, source: "ITK", error: e.message, details: e.data || null });
+  }
+});
+
+app.get("/itk/companies", async (req, res) => {
+  try {
+    const result = await callItk("/quoter/companies/", { method: "GET" });
+    res.json({ ok: true, source: "ITK", result });
+  } catch (e) {
+    console.error("[ITK/companies] Error:", e.message);
     res.status(e.status || 500).json({ ok: false, source: "ITK", error: e.message, details: e.data || null });
   }
 });
