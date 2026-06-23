@@ -11,6 +11,27 @@
 
 const express = require("express");
 const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
+
+function loadLocalEnv(filePath = path.join(__dirname, ".env")) {
+  if (!fs.existsSync(filePath)) return;
+  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const match = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (!match) continue;
+    const key = match[1];
+    let value = match[2].trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+loadLocalEnv();
 
 // ── CORS — single source of truth, function-based check is below at line ~67 ──
 
@@ -23,6 +44,8 @@ const AUTH_ID = process.env.COMPULIFE_AUTH_ID || "";
 const SERVER_IP_FALLBACK = process.env.REMOTE_IP || "162.220.232.99";
 const COMPULIFE_BASE = "https://www.compulifeapi.com/api";
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
+const ITK_API_KEY = process.env.ITK_API_KEY || "";
+const ITK_BASE_URL = (process.env.ITK_BASE_URL || "https://api.insurancetoolkits.com").replace(/\/$/, "");
 
 // ---- SMS & Email ----
 // As of May 2026: SMS and email both go through GHL (/ghl/conversations/messages).
@@ -129,9 +152,14 @@ app.get("/", (req, res) => {
       googleVision: !!GCP_VISION_API_KEY,
       supabaseStorage: !!(SUPABASE_URL && SUPABASE_SERVICE_KEY),
       ghl: !!GHL_API_KEY,
+      itk: !!(ITK_API_KEY && ITK_BASE_URL),
     },
     endpoints: [
       "POST   /compulife/quote",
+      "POST   /itk/quoter",
+      "POST   /itk/questionnaire/search/drug",
+      "POST   /itk/questionnaire/search/condition",
+      "POST   /itk/questionnaire/traversal",
       "POST   /compulife/sidebyside",
       "POST   /api/compulife/quotes",
       "GET    /compulife/diag",
@@ -164,6 +192,7 @@ app.use([
   "/scoreboard",
   "/production",
   "/brochure-mappings",
+  "/itk",
   "/compulife",
   "/api/compulife",
   "/drive",
@@ -1110,6 +1139,126 @@ app.post("/api/compulife/quotes", async (req, res) => {
     console.error("[Compulife/api/quotes] Error:", e.message);
     res.status(500).json({ error: true, message: e.message });
   }
+});
+
+const itkUsageEvents = [];
+
+function logItkUsage(event) {
+  itkUsageEvents.push({ at: new Date().toISOString(), ...event });
+  if (itkUsageEvents.length > 250) itkUsageEvents.splice(0, itkUsageEvents.length - 250);
+}
+
+async function callItk(pathname, options = {}) {
+  if (!ITK_API_KEY) {
+    const err = new Error("ITK_API_KEY is not configured.");
+    err.status = 500;
+    throw err;
+  }
+  const started = Date.now();
+  const r = await fetch(`${ITK_BASE_URL}${pathname}`, {
+    method: options.method || "POST",
+    headers: {
+      "X-API-KEY": ITK_API_KEY,
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+    },
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  });
+  const text = await r.text();
+  let data;
+  try { data = text ? JSON.parse(text) : null; }
+  catch { data = { raw: text }; }
+  logItkUsage({
+    path: pathname,
+    method: options.method || "POST",
+    ok: r.ok,
+    status: r.status,
+    duration_ms: Date.now() - started,
+    counted_quote_request: pathname.startsWith("/quoter/"),
+  });
+  if (!r.ok) {
+    const err = new Error(data?.error || data?.message || `ITK returned ${r.status}`);
+    err.status = r.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
+
+function cleanItkBody(body = {}) {
+  const copy = { ...body };
+  delete copy.apiKey;
+  delete copy.api_key;
+  delete copy.ITK_API_KEY;
+  return copy;
+}
+
+app.post("/itk/quoter", async (req, res) => {
+  try {
+    const result = await callItk("/quoter/", { body: cleanItkBody(req.body) });
+    res.json({ ok: true, source: "ITK", result });
+  } catch (e) {
+    console.error("[ITK/quoter] Error:", e.message);
+    res.status(e.status || 500).json({ ok: false, source: "ITK", error: e.message, details: e.data || null });
+  }
+});
+
+app.post("/itk/questionnaire/search/:kind", async (req, res) => {
+  try {
+    const kind = String(req.params.kind || "").toLowerCase();
+    if (!["drug", "condition"].includes(kind)) {
+      return res.status(400).json({ ok: false, error: "Search kind must be drug or condition." });
+    }
+    const result = await callItk(`/questionnaire/search/${kind}/`, { body: cleanItkBody(req.body) });
+    res.json({ ok: true, source: "ITK", kind, result });
+  } catch (e) {
+    console.error("[ITK/search] Error:", e.message);
+    res.status(e.status || 500).json({ ok: false, source: "ITK", error: e.message, details: e.data || null });
+  }
+});
+
+app.post("/itk/questionnaire/traversal", async (req, res) => {
+  try {
+    const result = await callItk("/questionnaire/traversal/", { body: cleanItkBody(req.body) });
+    res.json({ ok: true, source: "ITK", result });
+  } catch (e) {
+    console.error("[ITK/traversal] Error:", e.message);
+    res.status(e.status || 500).json({ ok: false, source: "ITK", error: e.message, details: e.data || null });
+  }
+});
+
+for (const action of ["answer", "prev", "edit"]) {
+  app.post(`/itk/questionnaire/traversal/${action}`, async (req, res) => {
+    try {
+      const result = await callItk(`/questionnaire/traversal/${action}/`, { body: cleanItkBody(req.body) });
+      res.json({ ok: true, source: "ITK", action, result });
+    } catch (e) {
+      console.error(`[ITK/traversal/${action}] Error:`, e.message);
+      res.status(e.status || 500).json({ ok: false, source: "ITK", error: e.message, details: e.data || null });
+    }
+  });
+}
+
+app.get("/itk/questionnaire/traversal/:sessionId", async (req, res) => {
+  try {
+    const sessionId = encodeURIComponent(String(req.params.sessionId || ""));
+    const result = await callItk(`/questionnaire/traversal/${sessionId}/`, { method: "GET" });
+    res.json({ ok: true, source: "ITK", result });
+  } catch (e) {
+    console.error("[ITK/traversal/get] Error:", e.message);
+    res.status(e.status || 500).json({ ok: false, source: "ITK", error: e.message, details: e.data || null });
+  }
+});
+
+app.get("/itk/usage", (req, res) => {
+  const quoteRequests = itkUsageEvents.filter(e => e.counted_quote_request).length;
+  res.json({
+    ok: true,
+    source: "ITK",
+    quoteRequests,
+    estimatedQuoteCost: Number((quoteRequests * 0.09).toFixed(2)),
+    recent: itkUsageEvents.slice(-50),
+  });
 });
 
 
