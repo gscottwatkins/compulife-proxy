@@ -158,6 +158,8 @@ app.get("/", (req, res) => {
       "POST   /compulife/quote",
       "POST   /itk/quoter",
       "GET    /itk/companies",
+      "POST   /itk/usage-event",
+      "GET    /itk/usage-ledger",
       "POST   /itk/questionnaire/search/drug",
       "POST   /itk/questionnaire/search/condition",
       "POST   /itk/questionnaire/traversal",
@@ -1211,6 +1213,82 @@ app.get("/itk/companies", async (req, res) => {
   } catch (e) {
     console.error("[ITK/companies] Error:", e.message);
     res.status(e.status || 500).json({ ok: false, source: "ITK", error: e.message, details: e.data || null });
+  }
+});
+
+function normalizeItkUsageEvent(body = {}) {
+  const estimatedCost = Number.isFinite(Number(body.estimated_cost))
+    ? Number(body.estimated_cost)
+    : 0.09;
+  return {
+    source: "quoteit",
+    agent_id: String(body.agent_id || body.agent || "").slice(0, 80),
+    agent_name: String(body.agent_name || "").slice(0, 160),
+    contact_id: String(body.contact_id || body.contactId || "").slice(0, 120),
+    client_id: String(body.client_id || body.clientId || "").slice(0, 40),
+    client_name: String(body.client_name || body.clientName || "").slice(0, 180),
+    toolkit: String(body.toolkit || "").slice(0, 40),
+    product_category: String(body.product_category || body.productCategory || "").slice(0, 80),
+    carrier_profile: String(body.carrier_profile || body.carrierProfile || "").slice(0, 80),
+    face_amount: Number(body.face_amount || body.faceAmount || 0) || 0,
+    term_length: body.term_length || body.termLength ? Number(body.term_length || body.termLength) || null : null,
+    quote_requests: Number(body.quote_requests || body.quoteRequests || 1) || 1,
+    quotes_returned: Number(body.quotes_returned || body.quotesReturned || 0) || 0,
+    excluded_count: Number(body.excluded_count || body.excludedCount || 0) || 0,
+    estimated_cost: estimatedCost,
+    request_meta: body.request_meta || body.requestMeta || {},
+  };
+}
+
+app.post("/itk/usage-event", async (req, res) => {
+  const row = normalizeItkUsageEvent(req.body || {});
+  logItkUsage({
+    path: "/itk/usage-event",
+    method: "POST",
+    ok: true,
+    status: 200,
+    duration_ms: 0,
+    counted_quote_request: false,
+    usage_event: row,
+  });
+  try {
+    const inserted = await supabaseRest("POST", "itk_usage_events", { body: row });
+    res.json({ ok: true, source: "Supabase", event: Array.isArray(inserted) ? inserted[0] : inserted });
+  } catch (e) {
+    console.error("[ITK/usage-event] Supabase write failed:", e.message);
+    res.status(e.status || 202).json({
+      ok: e.status === 404 ? true : false,
+      source: "memory-fallback",
+      warning: "ITK usage event was kept in server memory only. Create the itk_usage_events Supabase table for durable logging.",
+      error: e.message,
+      detail: e.data || null,
+      event: row,
+    });
+  }
+});
+
+app.get("/itk/usage-ledger", async (req, res) => {
+  try {
+    const params = new URLSearchParams();
+    params.set("select", "*");
+    params.set("order", "created_at.desc");
+    params.set("limit", String(Math.min(Number(req.query.limit || 100), 500)));
+    if (req.query.agent_id) params.set("agent_id", `eq.${String(req.query.agent_id)}`);
+    const rows = await supabaseRest("GET", "itk_usage_events", { query: params.toString() });
+    const quoteRequests = rows.reduce((sum, row) => sum + Number(row.quote_requests || 0), 0);
+    const estimatedCost = rows.reduce((sum, row) => sum + Number(row.estimated_cost || 0), 0);
+    res.json({ ok: true, source: "Supabase", quoteRequests, estimatedCost, rows });
+  } catch (e) {
+    const memoryRows = itkUsageEvents.filter(ev => ev.usage_event).map(ev => ({ created_at: ev.at, ...ev.usage_event })).slice(-100).reverse();
+    res.status(e.status === 404 ? 200 : e.status || 500).json({
+      ok: e.status === 404,
+      source: "memory-fallback",
+      warning: "Supabase durable table is not available yet.",
+      error: e.message,
+      rows: memoryRows,
+      quoteRequests: memoryRows.reduce((sum, row) => sum + Number(row.quote_requests || 0), 0),
+      estimatedCost: memoryRows.reduce((sum, row) => sum + Number(row.estimated_cost || 0), 0),
+    });
   }
 });
 
