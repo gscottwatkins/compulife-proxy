@@ -1697,6 +1697,14 @@ app.delete("/ghl/contacts/:id/tags", async (req, res) => {
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
+app.delete("/ghl/contacts/:id/workflow/:workflowId", async (req, res) => {
+  try {
+    const result = await ghlFetch("DELETE", `/contacts/${req.params.id}/workflow/${req.params.workflowId}`);
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
 app.post("/ghl/contacts/:id/notes", async (req, res) => {
   try { res.json(await ghlFetch("POST", `/contacts/${req.params.id}/notes`, { body: req.body.body || req.body.note, userId: req.body.userId })); }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
