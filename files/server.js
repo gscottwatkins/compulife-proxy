@@ -143,7 +143,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "iagentiq-api-hub",
-    version: "7.1.7",
+    version: "7.1.9",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
@@ -171,6 +171,7 @@ app.get("/", (req, res) => {
       "GET    /compulife/states",
       "GET    /compulife/products",
       "POST   /ghl/conversations/messages   (SMS + email both go here)",
+      "DELETE /ghl/contacts/:id/workflow/:workflowId",
       "POST   /drive/upload",
       "POST   /vision/ocr",
       "POST   /anthropic",
