@@ -1,5 +1,5 @@
 // ============================================================
-// iAgentIQ API HUB — Railway Proxy Server v7.2.0
+// iAgentIQ API HUB — Railway Proxy Server v7.2.1
 // Routes: Compulife | GHL (SMS+Email+CRM) | Anthropic | Google Drive | Vision
 // Deploy: Railway with Static Egress IP (162.220.232.99)
 // Updated: May 13, 2026 — Compulife proxy rewritten to match official API spec:
@@ -143,7 +143,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "iagentiq-api-hub",
-    version: "7.2.0",
+    version: "7.2.1",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
@@ -1709,7 +1709,7 @@ app.delete("/ghl/contacts/:id/workflow/:workflowId", async (req, res) => {
 
 app.post("/ghl/contacts/:id/workflow/:workflowId", async (req, res) => {
   try {
-    const eventStartTime = req.body?.eventStartTime || new Date().toISOString();
+    const eventStartTime = req.body?.eventStartTime || new Date().toISOString().replace("Z", "+00:00");
     const result = await ghlFetch(
       "POST",
       `/contacts/${req.params.id}/workflow/${req.params.workflowId}`,
