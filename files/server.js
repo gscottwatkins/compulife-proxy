@@ -1,5 +1,5 @@
 // ============================================================
-// iAgentIQ API HUB — Railway Proxy Server v7.2.1
+// iAgentIQ API HUB — Railway Proxy Server v7.2.2
 // Routes: Compulife | GHL (SMS+Email+CRM) | Anthropic | Google Drive | Vision
 // Deploy: Railway with Static Egress IP (162.220.232.99)
 // Updated: May 13, 2026 — Compulife proxy rewritten to match official API spec:
@@ -143,7 +143,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "iagentiq-api-hub",
-    version: "7.2.1",
+    version: "7.2.2",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
@@ -1626,6 +1626,23 @@ const GHL_API_KEY = process.env.GHL_API_KEY || "";
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "tOhI6SGWSB1guLHKIIqX";
 const GHL_BASE_URL = "https://services.leadconnectorhq.com";
 
+function chicagoIsoOffset(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+    timeZoneName: "longOffset",
+  }).formatToParts(date);
+  const value = type => parts.find(part => part.type === type)?.value || "";
+  const offset = value("timeZoneName").replace(/^GMT/, "") || "-06:00";
+  return `${value("year")}-${value("month")}-${value("day")}T${value("hour")}:${value("minute")}:${value("second")}${offset}`;
+}
+
 async function ghlFetch(method, path, body) {
   const url = GHL_BASE_URL + path;
   const opts = {
@@ -1709,7 +1726,7 @@ app.delete("/ghl/contacts/:id/workflow/:workflowId", async (req, res) => {
 
 app.post("/ghl/contacts/:id/workflow/:workflowId", async (req, res) => {
   try {
-    const eventStartTime = req.body?.eventStartTime || new Date().toISOString().replace("Z", "+00:00");
+    const eventStartTime = req.body?.eventStartTime || chicagoIsoOffset();
     const result = await ghlFetch(
       "POST",
       `/contacts/${req.params.id}/workflow/${req.params.workflowId}`,
