@@ -1682,7 +1682,18 @@ app.put("/ghl/contacts/:id", async (req, res) => {
 });
 
 app.post("/ghl/contacts/:id/tags", async (req, res) => {
-  try { res.json(await ghlFetch("POST", `/contacts/${req.params.id}/tags`, req.body)); }
+  try {
+    const result = await ghlFetch("POST", `/contacts/${req.params.id}/tags`, req.body);
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+app.delete("/ghl/contacts/:id/tags", async (req, res) => {
+  try {
+    const result = await ghlFetch("DELETE", `/contacts/${req.params.id}/tags`, req.body);
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
