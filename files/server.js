@@ -1,5 +1,5 @@
 // ============================================================
-// iAgentIQ API HUB — Railway Proxy Server v7.1.7
+// iAgentIQ API HUB — Railway Proxy Server v7.2.0
 // Routes: Compulife | GHL (SMS+Email+CRM) | Anthropic | Google Drive | Vision
 // Deploy: Railway with Static Egress IP (162.220.232.99)
 // Updated: May 13, 2026 — Compulife proxy rewritten to match official API spec:
@@ -143,7 +143,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "ok",
     service: "iagentiq-api-hub",
-    version: "7.1.9",
+    version: "7.2.0",
     timestamp: new Date().toISOString(),
     configured: {
       compulife: !!AUTH_ID,
@@ -171,6 +171,7 @@ app.get("/", (req, res) => {
       "GET    /compulife/states",
       "GET    /compulife/products",
       "POST   /ghl/conversations/messages   (SMS + email both go here)",
+      "POST   /ghl/contacts/:id/workflow/:workflowId",
       "DELETE /ghl/contacts/:id/workflow/:workflowId",
       "POST   /drive/upload",
       "POST   /vision/ocr",
@@ -1701,6 +1702,19 @@ app.delete("/ghl/contacts/:id/tags", async (req, res) => {
 app.delete("/ghl/contacts/:id/workflow/:workflowId", async (req, res) => {
   try {
     const result = await ghlFetch("DELETE", `/contacts/${req.params.id}/workflow/${req.params.workflowId}`);
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+app.post("/ghl/contacts/:id/workflow/:workflowId", async (req, res) => {
+  try {
+    const eventStartTime = req.body?.eventStartTime || new Date().toISOString();
+    const result = await ghlFetch(
+      "POST",
+      `/contacts/${req.params.id}/workflow/${req.params.workflowId}`,
+      { eventStartTime }
+    );
     res.status(result._ok ? 200 : result._status || 502).json(result);
   }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
