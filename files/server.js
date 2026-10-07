@@ -63,6 +63,7 @@ const LEAD_CARDS_BUCKET = process.env.SUPABASE_LEAD_CARDS_BUCKET || "lead-cards"
 const BROCHURES_BUCKET = process.env.SUPABASE_BROCHURES_BUCKET || "brochures";
 const BROCHURES_PREFIX = process.env.SUPABASE_BROCHURES_PREFIX || "carrier-brochures";
 const QUOTEIT_PROXY_SHARED_TOKEN = process.env.QUOTEIT_PROXY_SHARED_TOKEN || "";
+const QUOTEIT_PROXY_STAGING_TOKEN = process.env.QUOTEIT_PROXY_STAGING_TOKEN || "";
 const REMOTE_BROCHURE_URLS = {
   "gerber-guaranteed-life": "https://engine.iagentiq.com/brochures/GL_Product_Brochure.pdf",
 };
@@ -120,11 +121,14 @@ app.options("*", cors({
 app.use(express.json({ limit: "35mb" }));
 
 function proxyTokenAuthorized(req) {
-  if (!QUOTEIT_PROXY_SHARED_TOKEN) return true;
+  const authorizedTokens = [QUOTEIT_PROXY_SHARED_TOKEN, QUOTEIT_PROXY_STAGING_TOKEN]
+    .map((token) => String(token || "").trim())
+    .filter(Boolean);
+  if (!authorizedTokens.length) return true;
   const headerToken = String(req.headers["x-quoteit-proxy-token"] || "").trim();
   const auth = String(req.headers.authorization || "");
   const bearer = auth.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() || "";
-  return headerToken === QUOTEIT_PROXY_SHARED_TOKEN || bearer === QUOTEIT_PROXY_SHARED_TOKEN;
+  return authorizedTokens.includes(headerToken) || authorizedTokens.includes(bearer);
 }
 
 function requireQuoteItProxyToken(req, res, next) {

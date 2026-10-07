@@ -18,3 +18,9 @@ test("gateway release identifies deterministic-enrollment build", () => {
   assert.match(source, /version: "7\.2\.3"/);
   assert.match(source, /POST   \/ghl\/contacts\/:id\/workflow\/:workflowId/);
 });
+
+test("gateway accepts a separate staging proxy token", () => {
+  assert.match(source, /QUOTEIT_PROXY_STAGING_TOKEN/);
+  assert.match(source, /authorizedTokens\.includes\(headerToken\)/);
+  assert.match(source, /authorizedTokens\.includes\(bearer\)/);
+});
