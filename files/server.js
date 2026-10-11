@@ -1814,8 +1814,19 @@ app.get("/ghl/conversations", async (req, res) => {
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
-app.get("/ghl/conversations/:contactId", async (req, res) => {
-  try { res.json(await ghlFetch("GET", `/conversations/search?locationId=${GHL_LOCATION_ID}&contactId=${req.params.contactId}`)); }
+app.get("/ghl/contacts/:contactId/conversations", async (req, res) => {
+  try {
+    const result = await ghlFetch("GET", `/conversations/search?locationId=${GHL_LOCATION_ID}&contactId=${encodeURIComponent(req.params.contactId)}`);
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+app.get("/ghl/conversations/:conversationId", async (req, res) => {
+  try {
+    const result = await ghlFetch("GET", `/conversations/${encodeURIComponent(req.params.conversationId)}`);
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
