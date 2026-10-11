@@ -1808,7 +1808,7 @@ app.get("/ghl/conversations", async (req, res) => {
       const value = String(req.query[key] || "").trim();
       if (value) params.set(key, value);
     }
-    const result = await ghlFetch("GET", `/conversations/search?${params.toString()}`);
+    const result = await ghlFetch("GET", `/conversations/search?${params.toString()}`, undefined, "v3");
     res.status(result._ok ? 200 : result._status || 502).json(result);
   }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
@@ -1816,7 +1816,7 @@ app.get("/ghl/conversations", async (req, res) => {
 
 app.get("/ghl/contacts/:contactId/conversations", async (req, res) => {
   try {
-    const result = await ghlFetch("GET", `/conversations/search?locationId=${GHL_LOCATION_ID}&contactId=${encodeURIComponent(req.params.contactId)}`);
+    const result = await ghlFetch("GET", `/conversations/search?locationId=${GHL_LOCATION_ID}&contactId=${encodeURIComponent(req.params.contactId)}`, undefined, "v3");
     res.status(result._ok ? 200 : result._status || 502).json(result);
   }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
@@ -1824,14 +1824,14 @@ app.get("/ghl/contacts/:contactId/conversations", async (req, res) => {
 
 app.get("/ghl/conversations/:conversationId", async (req, res) => {
   try {
-    const result = await ghlFetch("GET", `/conversations/${encodeURIComponent(req.params.conversationId)}`);
+    const result = await ghlFetch("GET", `/conversations/${encodeURIComponent(req.params.conversationId)}`, undefined, "v3");
     res.status(result._ok ? 200 : result._status || 502).json(result);
   }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
 app.get("/ghl/conversations/:conversationId/messages", async (req, res) => {
-  try { res.json(await ghlFetch("GET", `/conversations/${req.params.conversationId}/messages`)); }
+  try { res.json(await ghlFetch("GET", `/conversations/${req.params.conversationId}/messages`, undefined, "v3")); }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
