@@ -1630,14 +1630,14 @@ const GHL_API_KEY = process.env.GHL_API_KEY || "";
 const GHL_LOCATION_ID = process.env.GHL_LOCATION_ID || "tOhI6SGWSB1guLHKIIqX";
 const GHL_BASE_URL = "https://services.leadconnectorhq.com";
 
-async function ghlFetch(method, path, body) {
+async function ghlFetch(method, path, body, version = "2021-07-28") {
   const url = GHL_BASE_URL + path;
   const opts = {
     method,
     headers: {
       "Authorization": `Bearer ${GHL_API_KEY}`,
       "Content-Type": "application/json",
-      "Version": "2021-07-28"
+      "Version": version
     }
   };
   if (body && method !== "GET") opts.body = JSON.stringify(body);
@@ -1751,8 +1751,69 @@ app.get("/ghl/custom-fields/:id", async (req, res) => {
 });
 
 // ============================================================
+// GHL — COURSES / ACADEMY (READ ONLY)
+// ============================================================
+app.get("/ghl/courses/products", async (_req, res) => {
+  try {
+    const result = await ghlFetch(
+      "GET",
+      `/courses/products?locationId=${encodeURIComponent(GHL_LOCATION_ID)}`,
+      undefined,
+      "v3"
+    );
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+app.get("/ghl/courses/products/:productId/categories", async (req, res) => {
+  try {
+    const result = await ghlFetch(
+      "GET",
+      `/courses/products/${encodeURIComponent(req.params.productId)}/categories?locationId=${encodeURIComponent(GHL_LOCATION_ID)}`,
+      undefined,
+      "v3"
+    );
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+app.get("/ghl/courses/products/:productId/lessons", async (req, res) => {
+  try {
+    const result = await ghlFetch(
+      "GET",
+      `/courses/products/${encodeURIComponent(req.params.productId)}/lessons?locationId=${encodeURIComponent(GHL_LOCATION_ID)}`,
+      undefined,
+      "v3"
+    );
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
+// ============================================================
 // GHL — CONVERSATIONS / MESSAGING
 // ============================================================
+app.get("/ghl/conversations", async (req, res) => {
+  try {
+    const params = new URLSearchParams({
+      locationId: GHL_LOCATION_ID,
+      limit: String(Math.min(100, Math.max(1, Number(req.query.limit) || 30))),
+      status: String(req.query.status || "recents"),
+      sort: String(req.query.sort || "desc"),
+      sortBy: String(req.query.sortBy || "last_message_date")
+    });
+    for (const key of ["contactId", "assignedTo", "followers", "mentions", "query", "startAfterDate", "id", "lastMessageType", "lastMessageAction", "lastMessageDirection"]) {
+      const value = String(req.query[key] || "").trim();
+      if (value) params.set(key, value);
+    }
+    const result = await ghlFetch("GET", `/conversations/search?${params.toString()}`);
+    res.status(result._ok ? 200 : result._status || 502).json(result);
+  }
+  catch (e) { res.status(500).json({ error: true, message: e.message }); }
+});
+
 app.get("/ghl/conversations/:contactId", async (req, res) => {
   try { res.json(await ghlFetch("GET", `/conversations/search?locationId=${GHL_LOCATION_ID}&contactId=${req.params.contactId}`)); }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
