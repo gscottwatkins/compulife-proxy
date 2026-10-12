@@ -1722,6 +1722,16 @@ app.post("/ghl/contacts/:id/workflow/:workflowId", async (req, res) => {
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
 });
 
+app.get("/ghl/contacts/:id/notes", async (req, res) => {
+  try {
+    const contact = await ghlFetch("GET", `/contacts/${encodeURIComponent(req.params.id)}`);
+    if (!contact._ok) return res.status(contact._status || 502).json(contact);
+    if (contact.contact?.locationId !== GHL_LOCATION_ID) return res.status(403).json({ error: true, message: "Contact is outside the configured CRM location." });
+    const result = await ghlFetch("GET", `/contacts/${encodeURIComponent(req.params.id)}/notes`);
+    return res.status(result._ok ? 200 : result._status || 502).json(result);
+  } catch (e) { res.status(502).json({ error: true, message: e.message }); }
+});
+
 app.post("/ghl/contacts/:id/notes", async (req, res) => {
   try { res.json(await ghlFetch("POST", `/contacts/${req.params.id}/notes`, { body: req.body.body || req.body.note, userId: req.body.userId })); }
   catch (e) { res.status(500).json({ error: true, message: e.message }); }
